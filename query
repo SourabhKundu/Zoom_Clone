@@ -1,0 +1,28 @@
+fin_summ_ac_dtls AS (
+    SELECT 
+        pra.ac_sk,
+        pra.ac_sk AS pra_ac_sk,
+        pra.data_src_id,
+        pra.ac_curr_dcde,
+        COALESCE(
+            (
+                SELECT mean_rt_amt
+                FROM npf_exch_rt
+                WHERE lcl_curr_dcde = pra.bse_curr_dcde
+                  AND as_of_date = (
+                      SELECT MAX(as_of_date)
+                      FROM npf_exch_rt
+                      WHERE as_of_date <= :v_valn_as_of_date
+                        AND lcl_curr_dcde = pra.bse_curr_dcde
+                  )
+            ),
+            1
+        ) AS exch_rt,
+        pra.comps_pct * :v_prtnr_pct AS prtnr_pct,
+        :p_consl_sk AS consl_sk,
+        (
+            SELECT cust_sk
+            FROM cust_data
+        ) AS cust_sk
+    FROM pra
+)
