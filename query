@@ -1,28 +1,138 @@
-fin_summ_ac_dtls AS (
+WITH decoder_count_cte AS (
+    SELECT COUNT(*) AS cnt
+    FROM npf_decoder_xref
+    WHERE decoder_ac_sk = :p_ac_sk
+),
+
+account_profile_cte AS (
     SELECT 
-        pra.ac_sk,
-        pra.ac_sk AS pra_ac_sk,
-        pra.data_src_id,
-        pra.ac_curr_dcde,
-        COALESCE(
-            (
-                SELECT mean_rt_amt
-                FROM npf_exch_rt
-                WHERE lcl_curr_dcde = pra.bse_curr_dcde
-                  AND as_of_date = (
-                      SELECT MAX(as_of_date)
-                      FROM npf_exch_rt
-                      WHERE as_of_date <= :v_valn_as_of_date
-                        AND lcl_curr_dcde = pra.bse_curr_dcde
-                  )
-            ),
-            1
-        ) AS exch_rt,
-        pra.comps_pct * :v_prtnr_pct AS prtnr_pct,
-        :p_consl_sk AS consl_sk,
-        (
-            SELECT cust_sk
-            FROM cust_data
-        ) AS cust_sk
-    FROM pra
+        dtl.ac_type_grp_dcde,
+        dtl.dtl_ac_type,
+        acc.cm_data_src_id,
+        acc.cm_ac_id
+    FROM npf_account acc
+    JOIN npf_dtl_ac_type dtl ON acc.dtl_ac_type = dtl.dtl_ac_type
+    WHERE acc.ac_sk = :p_ac_sk
+),
+
+ssn_cte AS (
+    SELECT
+        CASE
+            WHEN prof.ac_type_grp_dcde NOT IN ('PTR', 'MAG') THEN
+                (
+                    SELECT
+                        CASE
+                            WHEN prof.cm_data_src_id IN (5, 10) THEN
+                                SUBSTR(
+                                    REPLACE(REPLACE(v.i_tx, '+', ''), '-', ''),
+                                    3
+                                )
+                            ELSE
+                                REPLACE(REPLACE(v.i_tx, '+', ''), '-', '')
+                        END
+                    FROM nrn_ac_vw v
+                    WHERE v.i_src_sys = prof.cm_data_src_id
+                      AND v.i_nrn_ac = prof.cm_ac_id
+                    LIMIT 1
+                )
+            ELSE ''
+        END AS i_tx
+    FROM account_profile_cte prof
+),
+
+disclaimer_cte AS (
+    SELECT
+        CASE
+            WHEN prof.ac_type_grp_dcde IN ('ACK','CHK','ICK','SAV') AND prof.dtl_ac_type IN ('SAV') 
+                THEN getAccountDsclmr(prof.dtl_ac_type)
+            WHEN prof.ac_type_grp_dcde IN ('ACK','CHK','ICK','SAV') 
+                THEN getAccountNLDsclmr(prof.dtl_ac_type, :p_ac_sk)
+            ELSE getAccountDsclmr(prof.dtl_ac_type)
+        END AS dsclmr_desc
+    FROM account_profile_cte prof
+),
+
+valn_dates_cte AS (
+    SELECT
+        NVL(MAX(valn_as_of_date), CURRENT_DATE) AS max_valn_date
+    FROM NPF_AC_POSN_SUM
+    WHERE ac_sk = :p_ac_sk
+),
+
+data_load_date_cte AS (
+    SELECT
+        NVL(MAX(valn_as_of_date), CURRENT_DATE) AS data_load_date
+    FROM NPF_AC_POSN_SUM
+    WHERE ac_sk = :p_ac_sk
+      AND TRUNC(valn_as_of_date) >= TRUNC(CURRENT_DATE)
+),
+
+pg_day_cte AS (
+    SELECT TO_CHAR(CURRENT_DATE, 'DAY') AS pg_day
+),
+
+load_comp_cte AS (
+    SELECT 
+        TRUNC(data_load_date) AS load_comp_date
+    FROM NPF_DATA_LOAD
+    WHERE data_src_id = (
+        SELECT cm_data_src_id 
+        FROM account_profile_cte
+    )
+),
+
+begin_date_cte AS (
+    SELECT
+        CASE
+            WHEN (
+                (SELECT cm_data_src_id FROM account_profile_cte) NOT IN (8) AND
+                UPPER((SELECT pg_day FROM pg_day_cte)) LIKE 'MONDAY%'
+            )
+            THEN
+                CASE 
+                    WHEN (SELECT load_comp_date FROM load_comp_cte) < (SELECT data_load_date FROM data_load_date_cte)
+                    THEN TO_CHAR((
+                        SELECT MAX(valn_as_of_date)
+                        FROM NPF_AC_POSN_SUM
+                        WHERE ac_sk = :p_ac_sk
+                          AND TRUNC(valn_as_of_date) <= TRUNC(CURRENT_DATE)
+                    ), 'YYYY-MM-DD')
+                    ELSE TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
+                END
+            ELSE TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
+        END AS begin_date
 )
+
+SELECT
+    dc.cnt AS decoder_count,
+    ap.ac_type_grp_dcde,
+    ap.dtl_ac_type,
+    ap.cm_data_src_id,
+    ap.cm_ac_id,
+    ssn.i_tx,
+    ds.dsclmr_desc,
+    vd.max_valn_date,
+    bd.begin_date,
+    npf_common_pkg.npf_valn_mgr(
+        :p_ac_sk,
+        bd.begin_date,
+        'NA',
+        NULL, NULL, NULL, NULL, NULL
+    ) AS valn_mgr_result,
+    CASE
+        WHEN vd.max_valn_date IS NULL THEN 1
+        ELSE 0
+    END AS display_zero_valn,
+    CASE
+        WHEN dc.cnt >= 1 THEN getNonBankingBalsDcde(
+            :p_ac_sk, :p_cust_sk, ap.ac_type_grp_dcde, ssn.i_tx, ds.dsclmr_desc, 
+            CASE WHEN vd.max_valn_date IS NULL THEN 1 ELSE 0 END
+        )
+        ELSE npf_account_pkg.get_account_dtls(:p_ac_sk, :p_cust_sk, :p_user_sk)
+    END AS cur_out
+FROM decoder_count_cte dc,
+     account_profile_cte ap,
+     ssn_cte ssn,
+     disclaimer_cte ds,
+     valn_dates_cte vd,
+     begin_date_cte bd;
