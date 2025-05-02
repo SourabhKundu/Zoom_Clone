@@ -1,0 +1,179 @@
+Procedure: get_account_dtls  final query
+
+SELECT
+    ac.ac_sk,
+    DECODE(ac.data_src_id, 7, npf_data_mask_pkg.get_masked_acid_for_acsk(NULL, p_cust_sk, ac.ac_sk), ac.ac_id) AS ac_id,
+    ac.bk_id,
+    ac.ac_type,
+    actype.ac_type_desc,
+    ac.dtl_ac_type,
+    dtltype.dtl_ac_type_desc,
+    dtltype.ac_type_grp_dcde,
+    ac.data_src_id,
+    dtltype.prod_info_url_desc,
+    (
+        SELECT
+            CASE
+                WHEN v_operator = '+' THEN REPLACE(v_tx, '+', '')
+                WHEN v_operator = '-' THEN REPLACE(v_tx, '-', '')
+                ELSE v_tx
+            END
+        FROM (
+            SELECT
+                vw.nrn_ac AS v_tx,
+                SUBSTR(vw.nrn_ac, 1, 1) AS v_operator
+            FROM nrn_ac_vw vw
+            WHERE vw.i_src_sys = ac.cm_data_src_id
+              AND vw.nrn_ac = ac.cm_ac_id
+              AND ROWNUM = 1
+        ) base_tx
+        LEFT JOIN (
+            SELECT DISTINCT cm_data_src_id
+            FROM npf_account
+            WHERE data_src_id IN (5, 10)
+              AND cm_data_src_id IS NOT NULL
+        ) metavante ON metavante.cm_data_src_id = ac.cm_data_src_id
+    ) AS tx_id,
+
+    CASE
+        WHEN ac.data_src_id IN (6, 8) THEN COALESCE(ac.svc_prvdr_desc, src.ac_dtl_src_desc)
+        ELSE src.ac_dtl_src_desc
+    END AS data_src_desc,
+
+    NVL(alias.upd_ac_desc, DECODE(ac.data_src_id, 7, ac.ac_desc, npf_data_mask_pkg.get_masked_ac_name(NULL, p_cust_sk, ac.ac_sk, ac.ac_desc))) AS ac_desc,
+    alias.ac_alias,
+    ac.bse_curr_dcde,
+
+    (
+        SELECT dcde_desc
+        FROM npf_decode
+        WHERE TRIM(dcde_type) = 'CURRDDLB'
+          AND TRIM(dcde_code) = ac.bse_curr_dcde
+        FETCH FIRST 1 ROW ONLY
+    ) AS bse_curr,
+
+    ac.ac_stat_dcde,
+    ac.svc_prvdr_desc,
+    ac.svc_prvdr_url_desc,
+    ac.liab_flag,
+
+    (
+        SELECT dcde_desc
+        FROM npf_decode
+        WHERE TRIM(dcde_type) = 'LIABFLAG'
+          AND TRIM(dcde_code) = ac.liab_flag
+        FETCH FIRST 1 ROW ONLY
+    ) AS liab_flag_dcde,
+
+    ac.real_tm_upd_flag,
+    ac.fisc_yrnd,
+    ac.lot_rlf_meth_dcde,
+
+    CASE
+        WHEN ac.data_src_id IN (7,8,12) THEN (
+            SELECT dcde_desc FROM npf_decode
+            WHERE TRIM(dcde_type) = 'PCRSTYLE' AND TRIM(dcde_code) = ac.inv_obj_dcde
+            FETCH FIRST 1 ROW ONLY
+        )
+        ELSE (
+            SELECT dcde_desc FROM npf_decode
+            WHERE TRIM(dcde_type) = 'INVOBJ' AND TRIM(dcde_code) = ac.inv_obj_dcde
+            FETCH FIRST 1 ROW ONLY
+        )
+    END AS inv_obj_dcde,
+
+    ac.ac_prem_calc_meth_dcde,
+    ac.ac_amort_calc_meth_dcde,
+    ac.ac_acrt_calc_meth_dcde,
+    ac.ac_oid_calc_meth_dcde,
+    ac.ac_close_date,
+    ac.ac_open_date,
+    ac.npf_data_load_date,
+    ac.ac_creat_user_sk,
+    ac.cm_ac_id,
+    ac.cm_data_src_id,
+    ac.alw_marg_ac_flag,
+    ac.creat_by,
+    ac.creat_tm,
+    ac.upd_by,
+    ac.upd_tm,
+    src.extl_flg,
+
+    (
+        SELECT b.attrb_id || '!!' || b.attrb_desc
+        FROM npf_ac_attrib a
+        JOIN npf_attribute b ON a.attrb_id = b.attrb_id
+        WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 1
+        FETCH FIRST 1 ROW ONLY
+    ) AS attrib_desc1,
+
+    (
+        SELECT b.attrb_id || '!!' || b.attrb_desc
+        FROM npf_ac_attrib a
+        JOIN npf_attribute b ON a.attrb_id = b.attrb_id
+        WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 2
+        FETCH FIRST 1 ROW ONLY
+    ) AS attrib_desc2,
+
+    (
+        SELECT b.attrb_id || '!!' || b.attrb_desc
+        FROM npf_ac_attrib a
+        JOIN npf_attribute b ON a.attrb_id = b.attrb_id
+        WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 3
+        FETCH FIRST 1 ROW ONLY
+    ) AS attrib_desc3,
+
+    (
+        SELECT b.attrb_id || '!!' || b.attrb_desc
+        FROM npf_ac_attrib a
+        JOIN npf_attribute b ON a.attrb_id = b.attrb_id
+        WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 4
+        FETCH FIRST 1 ROW ONLY
+    ) AS attrib_desc4,
+
+    (
+        SELECT b.attrb_id || '!!' || b.attrb_desc
+        FROM npf_ac_attrib a
+        JOIN npf_attribute b ON a.attrb_id = b.attrb_id
+        WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 5
+        FETCH FIRST 1 ROW ONLY
+    ) AS attrib_desc5,
+
+    ac.ac_memo_desc,
+    pi.INDX_SK,
+    pi.INDX_DESC,
+    ast.vintage_yr,
+    ast.fund_type,
+
+    (
+        SELECT dcde_desc
+        FROM npf_decode
+        WHERE TRIM(dcde_type) = 'FUNDTYPE'
+          AND TRIM(dcde_code) = ast.fund_type
+        FETCH FIRST 1 ROW ONLY
+    ) AS fund_type_desc,
+
+    ast.prc_curr_dcde,
+
+    (
+        SELECT dcde_desc
+        FROM npf_decode
+        WHERE TRIM(dcde_type) = 'CURRDDLB'
+          AND TRIM(dcde_code) = ast.prc_curr_dcde
+        FETCH FIRST 1 ROW ONLY
+    ) AS prc_curr
+
+FROM
+    npf_account ac
+    LEFT JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = p_cust_sk
+    LEFT JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
+    LEFT JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+    LEFT JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
+    LEFT JOIN npf_perf_indx acp ON ac.AC_SK = acp.AC_SK
+    LEFT JOIN npf_perf_indx pi ON acp.INDX_SK = pi.INDX_SK
+    LEFT JOIN npf_asset ast ON ast.instr_id = LPAD(ac.ac_sk, 11, '0')
+WHERE
+    ac.ac_sk = p_ac_sk
+    AND EXISTS (
+        SELECT 1 FROM npf_ac_cust_user WHERE cust_sk = p_cust_sk AND user_sk = p_user_sk
+    );
