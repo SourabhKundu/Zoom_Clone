@@ -1,138 +1,149 @@
-WITH decoder_count_cte AS (
-    SELECT COUNT(*) AS cnt
-    FROM npf_decoder_xref
-    WHERE decoder_ac_sk = :p_ac_sk
+WITH dcde_curr_desc AS (
+    SELECT dcde_code, dcde_desc
+    FROM npf_decode
+    WHERE dcde_type = TRIM('CURR')
 ),
-
-account_profile_cte AS (
-    SELECT 
-        dtl.ac_type_grp_dcde,
-        dtl.dtl_ac_type,
-        acc.cm_data_src_id,
-        acc.cm_ac_id
-    FROM npf_account acc
-    JOIN npf_dtl_ac_type dtl ON acc.dtl_ac_type = dtl.dtl_ac_type
-    WHERE acc.ac_sk = :p_ac_sk
-),
-
-ssn_cte AS (
-    SELECT
-        CASE
-            WHEN prof.ac_type_grp_dcde NOT IN ('PTR', 'MAG') THEN
-                (
-                    SELECT
-                        CASE
-                            WHEN prof.cm_data_src_id IN (5, 10) THEN
-                                SUBSTR(
-                                    REPLACE(REPLACE(v.i_tx, '+', ''), '-', ''),
-                                    3
-                                )
-                            ELSE
-                                REPLACE(REPLACE(v.i_tx, '+', ''), '-', '')
-                        END
-                    FROM nrn_ac_vw v
-                    WHERE v.i_src_sys = prof.cm_data_src_id
-                      AND v.i_nrn_ac = prof.cm_ac_id
-                    LIMIT 1
-                )
-            ELSE ''
-        END AS i_tx
-    FROM account_profile_cte prof
-),
-
-disclaimer_cte AS (
-    SELECT
-        CASE
-            WHEN prof.ac_type_grp_dcde IN ('ACK','CHK','ICK','SAV') AND prof.dtl_ac_type IN ('SAV') 
-                THEN getAccountDsclmr(prof.dtl_ac_type)
-            WHEN prof.ac_type_grp_dcde IN ('ACK','CHK','ICK','SAV') 
-                THEN getAccountNLDsclmr(prof.dtl_ac_type, :p_ac_sk)
-            ELSE getAccountDsclmr(prof.dtl_ac_type)
-        END AS dsclmr_desc
-    FROM account_profile_cte prof
-),
-
-valn_dates_cte AS (
-    SELECT
-        NVL(MAX(valn_as_of_date), CURRENT_DATE) AS max_valn_date
-    FROM NPF_AC_POSN_SUM
-    WHERE ac_sk = :p_ac_sk
-),
-
-data_load_date_cte AS (
-    SELECT
-        NVL(MAX(valn_as_of_date), CURRENT_DATE) AS data_load_date
-    FROM NPF_AC_POSN_SUM
-    WHERE ac_sk = :p_ac_sk
-      AND TRUNC(valn_as_of_date) >= TRUNC(CURRENT_DATE)
-),
-
-pg_day_cte AS (
-    SELECT TO_CHAR(CURRENT_DATE, 'DAY') AS pg_day
-),
-
-load_comp_cte AS (
-    SELECT 
-        TRUNC(data_load_date) AS load_comp_date
-    FROM NPF_DATA_LOAD
-    WHERE data_src_id = (
-        SELECT cm_data_src_id 
-        FROM account_profile_cte
-    )
-),
-
-begin_date_cte AS (
-    SELECT
-        CASE
-            WHEN (
-                (SELECT cm_data_src_id FROM account_profile_cte) NOT IN (8) AND
-                UPPER((SELECT pg_day FROM pg_day_cte)) LIKE 'MONDAY%'
-            )
-            THEN
-                CASE 
-                    WHEN (SELECT load_comp_date FROM load_comp_cte) < (SELECT data_load_date FROM data_load_date_cte)
-                    THEN TO_CHAR((
-                        SELECT MAX(valn_as_of_date)
-                        FROM NPF_AC_POSN_SUM
-                        WHERE ac_sk = :p_ac_sk
-                          AND TRUNC(valn_as_of_date) <= TRUNC(CURRENT_DATE)
-                    ), 'YYYY-MM-DD')
-                    ELSE TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
-                END
-            ELSE TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
-        END AS begin_date
+dcde_liabflag_desc AS (
+    SELECT dcde_code, dcde_desc
+    FROM npf_decode
+    WHERE dcde_type = TRIM('LIABFLAG')
 )
+SELECT *
+FROM (
+    SELECT innerQuery.*, ROWNUM AS rn
+    FROM (
+        SELECT a.*, COUNT(a.ac_sk) OVER () AS total_count
+        FROM (
+            SELECT DISTINCT
+                CASE
+                    WHEN enrl_decoder_sk > 0 AND (tot_dec_ac - enrl_decoder_sk) = 0 THEN decode_sk
+                    ELSE ac_sk
+                END AS ac_sk,
+                CASE
+                    WHEN enrl_decoder_sk > 0 AND (tot_dec_ac - enrl_decoder_sk) = 0 THEN decoder_ac_id
+                    ELSE ac_id
+                END AS ac_id,
+                prtnr_prtnr_id,
+                bk_id,
+                ac_type,
+                ac_type_desc,
+                dtl_ac_type,
+                dtl_ac_type_desc,
+                data_src_id,
+                data_src_desc,
+                NVL(alias.upd_ac_desc, ac.ac_desc) AS ac_desc,
+                alias.ac_alias,
+                ac.bse_curr_dcde,
+                curr_desc.dcde_desc AS dcde_desc,
+                ac.ac_stat_dcde,
+                ac.svc_prvde_desc,
+                ac.svc_prvdr_url_desc,
+                ac.liab_flag,
+                liab_desc.dcde_desc AS liab_flag_dcde,
+                ac.real_tm_upd_flag,
+                ac.fisc_yrnd,
+                ac.lot_rlf_meth_dcde,
+                ac.inv_obj_dcde,
+                ac.prem_calc_meth_dcde,
+                ac.amort_calc_meth_dcde,
+                ac.acrt_calc_meth_dcde,
+                ac.oid_calc_meth_dcde,
+                ac.ac_close_date,
+                ac.ac_open_date,
+                ac.npf_data_load_date,
+                ac.ac_creat_user_sk,
+                ac.cm_ac_id,
+                ac.cm_data_src_id,
+                ac.alw_marg_ac_flag,
+                ac.creat_by,
+                ac.creat_tm,
+                ac.upd_by,
+                ac.upd_tm,
+                src.extl_flg,
 
-SELECT
-    dc.cnt AS decoder_count,
-    ap.ac_type_grp_dcde,
-    ap.dtl_ac_type,
-    ap.cm_data_src_id,
-    ap.cm_ac_id,
-    ssn.i_tx,
-    ds.dsclmr_desc,
-    vd.max_valn_date,
-    bd.begin_date,
-    npf_common_pkg.npf_valn_mgr(
-        :p_ac_sk,
-        bd.begin_date,
-        'NA',
-        NULL, NULL, NULL, NULL, NULL
-    ) AS valn_mgr_result,
-    CASE
-        WHEN vd.max_valn_date IS NULL THEN 1
-        ELSE 0
-    END AS display_zero_valn,
-    CASE
-        WHEN dc.cnt >= 1 THEN getNonBankingBalsDcde(
-            :p_ac_sk, :p_cust_sk, ap.ac_type_grp_dcde, ssn.i_tx, ds.dsclmr_desc, 
-            CASE WHEN vd.max_valn_date IS NULL THEN 1 ELSE 0 END
-        )
-        ELSE npf_account_pkg.get_account_dtls(:p_ac_sk, :p_cust_sk, :p_user_sk)
-    END AS cur_out
-FROM decoder_count_cte dc,
-     account_profile_cte ap,
-     ssn_cte ssn,
-     disclaimer_cte ds,
-     valn_dates_cte vd,
-     begin_date_cte bd;
+                (SELECT b.attrib_id || '!!' || b.attrib_desc FROM npf_ac_attrib a1 JOIN npf_attribute b ON a1.attrib_id = b.attrib_id
+                 WHERE a1.ac_sk = ac.ac_sk AND b.cust_sk = xref.cust_sk AND b.attrib_hdr_seq = 1 FETCH FIRST 1 ROW ONLY) AS attrb_desc1,
+
+                (SELECT b.attrib_id || '!!' || b.attrib_desc FROM npf_ac_attrib a2 JOIN npf_attribute b ON a2.attrib_id = b.attrib_id
+                 WHERE a2.ac_sk = ac.ac_sk AND b.cust_sk = xref.cust_sk AND b.attrib_hdr_seq = 2 FETCH FIRST 1 ROW ONLY) AS attrb_desc2,
+
+                (SELECT b.attrib_id || '!!' || b.attrib_desc FROM npf_ac_attrib a3 JOIN npf_attribute b ON a3.attrib_id = b.attrib_id
+                 WHERE a3.ac_sk = ac.ac_sk AND b.cust_sk = xref.cust_sk AND b.attrib_hdr_seq = 3 FETCH FIRST 1 ROW ONLY) AS attrb_desc3,
+
+                (SELECT b.attrib_id || '!!' || b.attrib_desc FROM npf_ac_attrib a4 JOIN npf_attribute b ON a4.attrib_id = b.attrib_id
+                 WHERE a4.ac_sk = ac.ac_sk AND b.cust_sk = xref.cust_sk AND b.attrib_hdr_seq = 4 FETCH FIRST 1 ROW ONLY) AS attrb_desc4,
+
+                (SELECT b.attrib_id || '!!' || b.attrib_desc FROM npf_ac_attrib a5 JOIN npf_attribute b ON a5.attrib_id = b.attrib_id
+                 WHERE a5.ac_sk = ac.ac_sk AND b.cust_sk = xref.cust_sk AND b.attrib_hdr_seq = 5 FETCH FIRST 1 ROW ONLY) AS attrb_desc5,
+
+                CASE
+                    WHEN alias.ac_alias IS NOT NULL THEN alias.ac_alias
+                    WHEN alias.upd_ac_desc IS NOT NULL THEN alias.upd_ac_desc
+                    ELSE ac.ac_desc
+                END AS display_desc,
+
+                ac.ac_memo_desc,
+                pi.indx_sk,
+                pi.indx_desc
+
+            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_cust_user xref
+            JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac ON ac.ac_sk = xref.ac_sk
+            JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_type actype ON actype.ac_type = ac.ac_type
+            JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+            JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_src src ON src.data_src_id = ac.data_src_id
+            LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = xref.cust_sk
+            LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_perf_indx acp ON acp.ac_sk = ac.ac_sk
+            LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_perf_indx pi ON pi.indx_sk = acp.indx_sk
+            LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref ndx ON ndx.ac_sk = xref.ac_sk
+            LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr prtnr ON prtnr.prtnr_sk = ac.prtnr_sk
+            LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac prtnr_ac ON prtnr_ac.ac_sk = ac.ac_sk
+            LEFT JOIN dcde_curr_desc curr_desc ON curr_desc.dcde_code = ac.bse_curr_dcde
+            LEFT JOIN dcde_liabflag_desc liab_desc ON liab_desc.dcde_code = ac.liab_flag
+            WHERE xref.user_sk = :p_user_sk
+              AND xref.cust_sk = :p_cust_sk
+              AND ac.data_src_id <> 12
+              AND EXISTS (
+                SELECT 1
+                FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_cmpnt
+                WHERE cmpnt_sk_val = ac.ac_sk
+                  AND (:p_consl_sk IS NULL OR consl_sk = :p_consl_sk)
+                  AND consl_cmpnt_stat_dcde = 'ACTIVE'
+              )
+              AND (:p_attrb_1 IS NULL OR attrb_desc1 = :p_attrb_1)
+              AND (:p_attrb_2 IS NULL OR attrb_desc2 = :p_attrb_2)
+              AND (:p_attrb_3 IS NULL OR attrb_desc3 = :p_attrb_3)
+              AND (:p_attrb_4 IS NULL OR attrb_desc4 = :p_attrb_4)
+              AND (:p_attrb_5 IS NULL OR attrb_desc5 IS NOT NULL)
+              AND (:p_ac_desc IS NULL OR UPPER(CASE
+                                                    WHEN alias.ac_alias IS NOT NULL THEN alias.ac_alias
+                                                    WHEN alias.upd_ac_desc IS NOT NULL THEN alias.upd_ac_desc
+                                                    ELSE ac.ac_desc
+                                               END) LIKE UPPER('%' || :p_ac_desc || '%'))
+              AND (:p_ac_id IS NULL OR UPPER(ac_id) LIKE UPPER('%' || :p_ac_id || '%'))
+        ) a
+   ORDER BY
+            CASE WHEN :v_sort_col = 'DISPLAY_DESC' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(display_desc)) END DESC,
+            CASE WHEN :v_sort_col = 'AC_ALIAS' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(ac_alias)) END ASC,
+            CASE WHEN :v_sort_col = 'AC_ALIAS' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(ac_alias)) END DESC,
+            CASE WHEN :v_sort_col = 'AC_ID' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(ac_id)) END ASC,
+            CASE WHEN :v_sort_col = 'AC_ID' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(ac_id)) END DESC,
+            CASE WHEN :v_sort_col = 'AC_TYPE_DESC' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(ac_type_desc)) END ASC,
+            CASE WHEN :v_sort_col = 'AC_TYPE_DESC' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(ac_type_desc)) END DESC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC1' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(attrb_desc1)) END ASC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC1' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(attrb_desc1)) END DESC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC2' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(attrb_desc2)) END ASC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC2' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(attrb_desc2)) END DESC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC3' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(attrb_desc3)) END ASC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC3' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(attrb_desc3)) END DESC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC4' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(attrb_desc4)) END ASC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC4' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(attrb_desc4)) END DESC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC5' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(attrb_desc5)) END ASC,
+            CASE WHEN :v_sort_col = 'ATTRB_DESC5' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(attrb_desc5)) END DESC,
+            CASE WHEN :v_sort_col = 'INDX_DESC' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(indx_desc)) END ASC,
+            CASE WHEN :v_sort_col = 'INDX_DESC' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(indx_desc)) END DESC,
+            CASE WHEN :v_sort_col = 'AC_DESC' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(ac_desc)) END ASC,
+            CASE WHEN :v_sort_col = 'AC_DESC' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(ac_desc)) END DESC
+    ) innerQuery
+    WHERE ROWNUM <= :p_last_index
+)
+WHERE rn >= :p_first_index;
