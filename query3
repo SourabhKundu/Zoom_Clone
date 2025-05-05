@@ -1,0 +1,83 @@
+SELECT
+  ac.ac_sk,
+  ac.bk_id,
+  ac.ac_type,
+  actype.ac_type_desc,
+  ac.dtl_ac_type,
+  dtltype.dtl_ac_type_desc,
+  dtltype.ac_type_grp_dcde,
+  ac.data_src_id,
+  dtltype.prod_info_url_desc,
+
+  CASE
+    WHEN ac.data_src_id = 7 AND get_data_mask_user_flag(p_user_sk, p_cust_sk, ac.ac_sk) = 1 THEN
+      get_masked_ac_id(ac.ac_id)
+    WHEN ac.data_src_id = 7 THEN (
+      SELECT
+        CASE
+          WHEN UPPER(opt.sys_opt_val) = 'TRUE'
+            AND LENGTH(ac.ac_id) > 4
+            AND (
+              COALESCE(
+                (SELECT usr.dflt_rptg_type FROM npf_user usr WHERE usr.user_sk = p_user_sk),
+                (SELECT usr.dflt_rptg_type
+                 FROM npf_user usr
+                 JOIN npf_ac_cust_user acu ON usr.user_sk = acu.user_sk
+                 WHERE acu.cust_sk = p_cust_sk AND acu.ac_sk = ac.ac_sk AND usr.dflt_rptg_type = 'WLT'),
+                'PCS'
+              ) = 'PCS'
+            )
+          THEN LPAD(
+            SUBSTR(ac.ac_id, INSTR(ac.ac_id, ' ', 1, 1) + 1),
+            LENGTH(ac.ac_id),
+            'x'
+          )
+          ELSE ac.ac_id
+        END
+      FROM ecp_sys_opt opt
+      WHERE opt.sys_opt_key = 'ecp.account.masking'
+    )
+    ELSE ac.ac_id
+  END AS ac_id,
+
+  CASE
+    WHEN ac.data_src_id = 7 AND get_data_mask_user_flag(p_user_sk, p_cust_sk, ac.ac_sk) = 1 THEN (
+      SELECT
+        CASE
+          WHEN ac.ac_stat_dcde = 'CLOSED' AND ac.data_src_id NOT IN (6, 7)
+          THEN 'Closed - ' || dtl.dtl_ac_type_desc
+          ELSE dtl.dtl_ac_type_desc
+        END
+      FROM npf_dtl_ac_type dtl
+      WHERE dtl.dtl_ac_type = ac.dtl_ac_type
+    )
+    WHEN ac.data_src_id = 7 AND ac.ac_stat_dcde = 'CLOSED' AND ac.data_src_id NOT IN (6, 7) THEN
+      'Closed - ' || ac.ac_desc
+    ELSE ac.ac_desc
+  END AS ac_desc,
+
+  alias.upd_ac_desc,
+  alias.last_upd_ts,
+  cmpnt.cmpnt_dede,
+  cmpnt.sort_nbr
+
+FROM
+  npf_account ac
+JOIN npf_ac_type actype
+  ON ac.ac_type = actype.ac_type
+JOIN npf_dtl_ac_type dtltype
+  ON ac.dtl_ac_type = dtltype.dtl_ac_type
+LEFT JOIN npf_cust_ac alias
+  ON alias.ac_sk = ac.ac_sk
+LEFT JOIN npf_consl_cmpnt cmpnt
+  ON cmpnt.ac_sk = ac.ac_sk
+
+WHERE
+  ac.ac_stat_dcde = 'ACT'
+  AND alias.cust_sk = p_cust_sk
+  AND EXISTS (
+    SELECT 1
+    FROM cust_user_xref xref
+    WHERE xref.cust_sk = alias.cust_sk
+      AND xref.user_sk = p_user_sk
+  );
