@@ -1,0 +1,41 @@
+SELECT
+  ac.ac_sk,
+  ac.bk_id,
+  ac.ac_type,
+  actype.ac_type_desc,
+  ac.dtl_ac_type,
+  dtltype.dtl_ac_type_desc,
+  dtltype.ac_type_grp_dcde,
+  ac.data_src_id,
+  dtltype.prod_info_url_desc,
+  CASE
+    WHEN ac.data_src_id = 7 THEN NPF_DATA_MASK_PKG.GET_MASKED_ACID_FOR_ACSK(p_user_sk, p_cust_sk, ac.ac_sk)
+    ELSE ac.ac_id
+  END AS ac_id,
+  CASE
+    WHEN ac.data_src_id = 7 THEN NPF_DATA_MASK_PKG.GET_MASKED_AC_NAME(p_user_sk, p_cust_sk, ac.ac_sk, ac.ac_desc)
+    ELSE ac.ac_desc
+  END AS ac_desc,
+  alias.upd_ac_desc,
+  alias.last_upd_ts,
+  cmpnt.cmpnt_dede,
+  cmpnt.sort_nbr
+FROM
+  npf_account ac
+JOIN npf_ac_type actype
+  ON ac.ac_type = actype.ac_type
+JOIN npf_dtl_ac_type dtltype
+  ON ac.dtl_ac_type = dtltype.dtl_ac_type
+LEFT JOIN npf_cust_ac alias
+  ON alias.ac_sk = ac.ac_sk
+LEFT JOIN npf_consl_cmpnt cmpnt
+  ON cmpnt.ac_sk = ac.ac_sk
+WHERE
+  ac.ac_stat_dcde = 'ACT'
+  AND alias.cust_sk = p_cust_sk
+  AND EXISTS (
+    SELECT 1
+    FROM cust_user_xref xref
+    WHERE xref.cust_sk = alias.cust_sk
+      AND xref.user_sk = p_user_sk
+  );
