@@ -1,10 +1,23 @@
 
 SELECT
     ac.ac_sk,
-
     CASE 
         WHEN ac.data_src_id = 7 
-             AND get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) = 1
+             AND 
+(
+  SELECT COUNT(*) 
+  FROM REA_ENRL_APPL_F_TEST APPL
+  JOIN NTA_REA_ENRL REA_ENRL ON APPL.I_ENRL = REA_ENRL.I_ENRL
+  JOIN NTA_ENRL ENRL ON ENRL.I_REA_ENRL = REA_ENRL.I_ENRL
+  JOIN NPF_USER USR ON USR.LOGIN_ID = ENRL.I_ENRL_ASG
+  JOIN NPF_AC_CUST_USER ACU ON USR.USER_SK = ACU.USER_SK
+  WHERE 
+    USR.USER_SK = p_user_sk
+    AND ACU.CUST_SK = p_cust_sk
+    AND ACU.AC_SK = ac.ac_sk
+    AND APPL.F_TEST = 1
+) > 0
+ = 1
              AND (
                  SELECT UPPER(SYS_OPT_VAL)
                  FROM ECP_SYS_OPT 
@@ -68,7 +81,21 @@ SELECT
         alias.upd_ac_desc,
         CASE 
             WHEN ac.data_src_id = 7 THEN ac.ac_desc
-            WHEN get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) = 1 THEN (
+            WHEN 
+(
+  SELECT COUNT(*) 
+  FROM REA_ENRL_APPL_F_TEST APPL
+  JOIN NTA_REA_ENRL REA_ENRL ON APPL.I_ENRL = REA_ENRL.I_ENRL
+  JOIN NTA_ENRL ENRL ON ENRL.I_REA_ENRL = REA_ENRL.I_ENRL
+  JOIN NPF_USER USR ON USR.LOGIN_ID = ENRL.I_ENRL_ASG
+  JOIN NPF_AC_CUST_USER ACU ON USR.USER_SK = ACU.USER_SK
+  WHERE 
+    USR.USER_SK = p_user_sk
+    AND ACU.CUST_SK = p_cust_sk
+    AND ACU.AC_SK = ac.ac_sk
+    AND APPL.F_TEST = 1
+) > 0
+ = 1 THEN (
                 SELECT 
                     CASE 
                         WHEN a.ac_stat_dcde = 'CLOSED' AND a.data_src_id NOT IN (6,7)
