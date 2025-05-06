@@ -1,16 +1,13 @@
-SELECT DISTINCT
-    CASE 
-        WHEN ndx.DECODER_AC_SK IS NOT NULL 
-             AND (tot_dec_ac - ndx.DECODER_AC_SK) > 0 
-        THEN DECODE(ac_sk)  -- Replace with logic if needed
-        ELSE ac.ac_sk
+WITH account_data AS (
+  SELECT
+    CASE
+      WHEN ndx.DECODER_AC_SK IS NOT NULL AND (tot_dec_ac - ndx.DECODER_AC_SK) > 0 THEN ndx.DECODER_SK
+      ELSE ac.ac_sk
     END AS ac_sk,
 
-    CASE 
-        WHEN ndx.DECODER_AC_SK IS NOT NULL 
-             AND (tot_dec_ac - ndx.DECODER_AC_SK) > 0 
-        THEN DECODE(ac_id)  -- Replace with logic if needed
-        ELSE ac.ac_id
+    CASE
+      WHEN ndx.DECODER_AC_SK IS NOT NULL AND (tot_dec_ac - ndx.DECODER_AC_SK) > 0 THEN ndx.DECODER_AC_ID
+      ELSE ac.ac_id
     END AS ac_id,
 
     prtnr.prtnr_id,
@@ -21,16 +18,15 @@ SELECT DISTINCT
     dtltype.dtl_ac_type_desc,
     ac.data_src_id,
     src.data_src_desc,
-
     COALESCE(alias.upd_ac_desc, ac.ac_desc) AS ac_desc,
     alias.ac_alias,
     ac.bse_curr_dcde,
-    (SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'CURR' AND dcde_code = ac.bse_curr_dcde) AS dcde_desc,
+    dcde_curr.dcde_desc AS dcde_desc,
     ac.ac_stat_dcde,
     ac.svc_prvdr_desc,
     ac.svc_prvdr_url_desc,
     ac.liab_flag,
-    (SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'LIABFLAG' AND dcde_code = ac.liab_flag) AS liab_flag_dcde,
+    dcde_liab.dcde_desc AS liab_flag_dcde,
     ac.real_tm_upd_flag,
     ac.fisc_yrmnd,
     ac.lot_rlf_meth_dcde,
@@ -52,38 +48,79 @@ SELECT DISTINCT
     ac.upd_tm,
     src.extl_flg,
 
-    -- Account attribute functions (should be replaced with LEFT JOINs or subqueries in Snowflake)
-    (SELECT b.attrib_desc || '|' || b.attrib_id
-     FROM npf_ac_attrib a 
-     JOIN npf_attribute b ON a.attrib_id = b.attrib_id
-     WHERE a.ac_sk = ac.ac_sk AND a.cust_sk = xref.cust_sk AND a.attrib_hdr_seq = 1) AS attrib_desc1,
+    -- Account attributes
+    attr1.attrib_desc AS attrib_desc1,
+    attr2.attrib_desc AS attrib_desc2,
+    attr3.attrib_desc AS attrib_desc3,
+    attr4.attrib_desc AS attrib_desc4,
+    attr5.attrib_desc AS attrib_desc5,
 
-    (same as above with seq 2) AS attrib_desc2,
-    (same as above with seq 3) AS attrib_desc3,
-    (same as above with seq 4) AS attrib_desc4,
-    (same as above with seq 5) AS attrib_desc5,
-
-    -- Display alias
     COALESCE(alias.ac_alias, ac.ac_desc) AS display_desc,
-
     ac.ac_memo_desc,
     pi.indx_sk,
-    pi.indx_desc
+    pi.indx_desc,
 
-FROM 
-    npf_ac_cust_user xref
-JOIN npf_account ac ON ac.ac_sk = xref.ac_sk
-JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
-JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
-JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
-LEFT JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = xref.cust_sk
-LEFT JOIN npf_perf_indx acp ON acp.ac_sk = ac.ac_sk
-LEFT JOIN npf_perf_indx pi ON pi.indx_sk = acp.indx_sk
-LEFT JOIN npf_decoder_xref ndx ON ndx.cust_sk = xref.cust_sk
-LEFT JOIN npf_mstr_prtnr_ac prtnr ON prtnr.ac_sk = ac.ac_sk
+    ROW_NUMBER() OVER (ORDER BY 
+      CASE WHEN :v_sort_col = 'DISPLAY_DESC' AND :v_sort_type = 'ASC' THEN UPPER(TRIM(COALESCE(alias.ac_alias, ac.ac_desc))) END ASC,
+      CASE WHEN :v_sort_col = 'DISPLAY_DESC' AND :v_sort_type = 'DESC' THEN UPPER(TRIM(COALESCE(alias.ac_alias, ac.ac_desc))) END DESC
+    ) AS rn
 
-WHERE
+  FROM npf_ac_cust_user xref
+  JOIN npf_account ac ON ac.ac_sk = xref.ac_sk
+  JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
+  JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+  JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
+  LEFT JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = xref.cust_sk
+  LEFT JOIN npf_perf_indx acp ON acp.ac_sk = ac.ac_sk
+  LEFT JOIN npf_perf_indx pi ON pi.indx_sk = acp.indx_sk
+  LEFT JOIN npf_decoder_xref ndx ON ndx.cust_sk = xref.cust_sk
+  LEFT JOIN npf_mstr_prtnr_ac prtnr ON prtnr.ac_sk = ac.ac_sk
+  LEFT JOIN npf_decode dcde_curr ON dcde_curr.dcde_type = 'CURR' AND dcde_curr.dcde_code = ac.bse_curr_dcde
+  LEFT JOIN npf_decode dcde_liab ON dcde_liab.dcde_type = 'LIABFLAG' AND dcde_liab.dcde_code = ac.liab_flag
+
+  -- Attributes joined via subqueries (can be optimized if needed)
+  LEFT JOIN (
+    SELECT ac_sk, cust_sk, attrib_hdr_seq, attrib_desc || '|' || attrib_id AS attrib_desc
+    FROM npf_ac_attrib a
+    JOIN npf_attribute b ON a.attrib_id = b.attrib_id
+    WHERE attrib_hdr_seq = 1
+  ) attr1 ON attr1.ac_sk = ac.ac_sk AND attr1.cust_sk = xref.cust_sk
+
+  LEFT JOIN (
+    SELECT ac_sk, cust_sk, attrib_hdr_seq, attrib_desc || '|' || attrib_id AS attrib_desc
+    FROM npf_ac_attrib a
+    JOIN npf_attribute b ON a.attrib_id = b.attrib_id
+    WHERE attrib_hdr_seq = 2
+  ) attr2 ON attr2.ac_sk = ac.ac_sk AND attr2.cust_sk = xref.cust_sk
+
+  LEFT JOIN (
+    SELECT ac_sk, cust_sk, attrib_hdr_seq, attrib_desc || '|' || attrib_id AS attrib_desc
+    FROM npf_ac_attrib a
+    JOIN npf_attribute b ON a.attrib_id = b.attrib_id
+    WHERE attrib_hdr_seq = 3
+  ) attr3 ON attr3.ac_sk = ac.ac_sk AND attr3.cust_sk = xref.cust_sk
+
+  LEFT JOIN (
+    SELECT ac_sk, cust_sk, attrib_hdr_seq, attrib_desc || '|' || attrib_id AS attrib_desc
+    FROM npf_ac_attrib a
+    JOIN npf_attribute b ON a.attrib_id = b.attrib_id
+    WHERE attrib_hdr_seq = 4
+  ) attr4 ON attr4.ac_sk = ac.ac_sk AND attr4.cust_sk = xref.cust_sk
+
+  LEFT JOIN (
+    SELECT ac_sk, cust_sk, attrib_hdr_seq, attrib_desc || '|' || attrib_id AS attrib_desc
+    FROM npf_ac_attrib a
+    JOIN npf_attribute b ON a.attrib_id = b.attrib_id
+    WHERE attrib_hdr_seq = 5
+  ) attr5 ON attr5.ac_sk = ac.ac_sk AND attr5.cust_sk = xref.cust_sk
+
+  WHERE
     xref.user_sk = :v_user_sk
     AND xref.cust_sk = :p_cust_sk
     AND src.data_src_id < 12
-    -- Add more conditions from your input params if needed (like :p_ac_type, :p_attrb_1, etc.)
+    -- Include more filters if needed
+
+)
+SELECT *
+FROM account_data
+QUALIFY rn BETWEEN :p_first_index AND :p_last_index;
