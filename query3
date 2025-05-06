@@ -3,34 +3,26 @@ SELECT
     ac.ac_sk,
 
     CASE 
-        WHEN ac.data_src_id = 7 THEN
-            (
-                SELECT 
-                    CASE 
-                        WHEN (
-                            SELECT get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) FROM dual
-                        ) = 1 THEN 
-                            (
-                                SELECT 
-                                    CASE 
-                                        WHEN UPPER(SYS_OPT_VAL) = 'Y' AND LENGTH(ac.ac_id) > 4 AND (
-                                            SELECT COALESCE(
-                                                (SELECT DFLT_RPTG_TYPE FROM NPF_USER WHERE USER_SK = p_user_sk AND ROWNUM = 1),
-                                                (SELECT USR.DFLT_RPTG_TYPE FROM NPF_USER USR, NPF_AC_CUST_USER ACU 
-                                                 WHERE USR.USER_SK = ACU.USER_SK AND ACU.CUST_SK = p_cust_sk 
-                                                 AND ACU.AC_SK = ac.ac_sk AND ROWNUM = 1)
-                                            ) = 'PCS'
-                                        THEN 
-                                            LPAD(SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4), LENGTH(ac.ac_id), 'x')
-                                        ELSE ac.ac_id
-                                    END
-                                FROM ECP_SYS_OPT 
-                                WHERE SYS_OPT_KEY = 'ecp.account.masking'
-                            )
-                        ELSE ac.ac_id
-                    END
-                FROM dual
-            )
+        WHEN ac.data_src_id = 7 
+             AND get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) = 1
+             AND (
+                 SELECT UPPER(SYS_OPT_VAL)
+                 FROM ECP_SYS_OPT 
+                 WHERE SYS_OPT_KEY = 'ecp.account.masking'
+                 LIMIT 1
+             ) = 'Y'
+             AND LENGTH(ac.ac_id) > 4
+             AND (
+                 COALESCE(
+                     (SELECT DFLT_RPTG_TYPE FROM NPF_USER WHERE USER_SK = p_user_sk LIMIT 1),
+                     (SELECT USR.DFLT_RPTG_TYPE 
+                      FROM NPF_USER USR 
+                      JOIN NPF_AC_CUST_USER ACU ON USR.USER_SK = ACU.USER_SK
+                      WHERE ACU.CUST_SK = p_cust_sk AND ACU.AC_SK = ac.ac_sk
+                      LIMIT 1)
+                 )
+             ) = 'PCS'
+        THEN LPAD(SUBSTR(ac.ac_id, POSITION('(' IN ac.ac_id) - 4), LENGTH(ac.ac_id), 'x')
         ELSE ac.ac_id
     END AS ac_id,
 
@@ -57,7 +49,7 @@ SELECT
             FROM nrn_ac_vw vw
             WHERE vw.i_src_sys = ac.cm_data_src_id
               AND vw.nrn_ac = ac.cm_ac_id
-              AND ROWNUM = 1
+              LIMIT 1
         ) base_tx
         LEFT JOIN (
             SELECT DISTINCT cm_data_src_id
@@ -76,28 +68,19 @@ SELECT
         alias.upd_ac_desc,
         CASE 
             WHEN ac.data_src_id = 7 THEN ac.ac_desc
-            ELSE (
+            WHEN get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) = 1 THEN (
                 SELECT 
                     CASE 
-                        WHEN (
-                            SELECT get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) FROM dual
-                        ) = 1 THEN 
-                            (
-                                SELECT 
-                                    CASE 
-                                        WHEN ac_stat_dcde = 'CLOSED' AND data_src_id NOT IN (6,7)
-                                        THEN 'Closed - ' || dtl_ac_type_desc
-                                        ELSE dtl_ac_type_desc
-                                    END
-                                FROM npf_account a
-                                JOIN npf_dtl_ac_type d ON a.dtl_ac_type = d.dtl_ac_type
-                                WHERE a.ac_sk = ac.ac_sk
-                                FETCH FIRST 1 ROW ONLY
-                            )
-                        ELSE ac.ac_desc
+                        WHEN a.ac_stat_dcde = 'CLOSED' AND a.data_src_id NOT IN (6,7)
+                        THEN 'Closed - ' || d.dtl_ac_type_desc
+                        ELSE d.dtl_ac_type_desc
                     END
-                FROM dual
+                FROM npf_account a
+                JOIN npf_dtl_ac_type d ON a.dtl_ac_type = d.dtl_ac_type
+                WHERE a.ac_sk = ac.ac_sk
+                LIMIT 1
             )
+            ELSE ac.ac_desc
         END
     ) AS ac_desc,
 
@@ -109,7 +92,7 @@ SELECT
         FROM npf_decode
         WHERE TRIM(dcde_type) = 'CURRDDLB'
           AND TRIM(dcde_code) = ac.bse_curr_dcde
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS bse_curr,
 
     ac.ac_stat_dcde,
@@ -122,7 +105,7 @@ SELECT
         FROM npf_decode
         WHERE TRIM(dcde_type) = 'LIABFLAG'
           AND TRIM(dcde_code) = ac.liab_flag
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS liab_flag_dcde,
 
     ac.real_tm_upd_flag,
@@ -133,12 +116,12 @@ SELECT
         WHEN ac.data_src_id IN (7,8,12) THEN (
             SELECT dcde_desc FROM npf_decode
             WHERE TRIM(dcde_type) = 'PCRSTYLE' AND TRIM(dcde_code) = ac.inv_obj_dcde
-            FETCH FIRST 1 ROW ONLY
+            LIMIT 1
         )
         ELSE (
             SELECT dcde_desc FROM npf_decode
             WHERE TRIM(dcde_type) = 'INVOBJ' AND TRIM(dcde_code) = ac.inv_obj_dcde
-            FETCH FIRST 1 ROW ONLY
+            LIMIT 1
         )
     END AS inv_obj_dcde,
 
@@ -164,7 +147,7 @@ SELECT
         FROM npf_ac_attrib a
         JOIN npf_attribute b ON a.attrb_id = b.attrb_id
         WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 1
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS attrib_desc1,
 
     (
@@ -172,7 +155,7 @@ SELECT
         FROM npf_ac_attrib a
         JOIN npf_attribute b ON a.attrb_id = b.attrb_id
         WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 2
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS attrib_desc2,
 
     (
@@ -180,7 +163,7 @@ SELECT
         FROM npf_ac_attrib a
         JOIN npf_attribute b ON a.attrb_id = b.attrb_id
         WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 3
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS attrib_desc3,
 
     (
@@ -188,7 +171,7 @@ SELECT
         FROM npf_ac_attrib a
         JOIN npf_attribute b ON a.attrb_id = b.attrb_id
         WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 4
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS attrib_desc4,
 
     (
@@ -196,7 +179,7 @@ SELECT
         FROM npf_ac_attrib a
         JOIN npf_attribute b ON a.attrb_id = b.attrb_id
         WHERE a.ac_sk = ac.ac_sk AND b.cust_sk = alias.cust_sk AND b.attrb_hdr_seq = 5
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS attrib_desc5,
 
     ac.ac_memo_desc,
@@ -210,7 +193,7 @@ SELECT
         FROM npf_decode
         WHERE TRIM(dcde_type) = 'FUNDTYPE'
           AND TRIM(dcde_code) = ast.fund_type
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS fund_type_desc,
 
     ast.prc_curr_dcde,
@@ -220,7 +203,7 @@ SELECT
         FROM npf_decode
         WHERE TRIM(dcde_type) = 'CURRDDLB'
           AND TRIM(dcde_code) = ast.prc_curr_dcde
-        FETCH FIRST 1 ROW ONLY
+        LIMIT 1
     ) AS prc_curr
 
 FROM
@@ -237,4 +220,3 @@ WHERE
     AND EXISTS (
         SELECT 1 FROM npf_ac_cust_user WHERE cust_sk = p_cust_sk AND user_sk = p_user_sk
     );
-
