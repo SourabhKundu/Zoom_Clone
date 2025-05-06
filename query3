@@ -1,83 +1,89 @@
-SELECT
-  ac.ac_sk,
-  ac.bk_id,
-  ac.ac_type,
-  actype.ac_type_desc,
-  ac.dtl_ac_type,
-  dtltype.dtl_ac_type_desc,
-  dtltype.ac_type_grp_dcde,
-  ac.data_src_id,
-  dtltype.prod_info_url_desc,
+SELECT DISTINCT
+    CASE 
+        WHEN ndx.DECODER_AC_SK IS NOT NULL 
+             AND (tot_dec_ac - ndx.DECODER_AC_SK) > 0 
+        THEN DECODE(ac_sk)  -- Replace with logic if needed
+        ELSE ac.ac_sk
+    END AS ac_sk,
 
-  CASE
-    WHEN ac.data_src_id = 7 AND get_data_mask_user_flag(p_user_sk, p_cust_sk, ac.ac_sk) = 1 THEN
-      get_masked_ac_id(ac.ac_id)
-    WHEN ac.data_src_id = 7 THEN (
-      SELECT
-        CASE
-          WHEN UPPER(opt.sys_opt_val) = 'TRUE'
-            AND LENGTH(ac.ac_id) > 4
-            AND (
-              COALESCE(
-                (SELECT usr.dflt_rptg_type FROM npf_user usr WHERE usr.user_sk = p_user_sk),
-                (SELECT usr.dflt_rptg_type
-                 FROM npf_user usr
-                 JOIN npf_ac_cust_user acu ON usr.user_sk = acu.user_sk
-                 WHERE acu.cust_sk = p_cust_sk AND acu.ac_sk = ac.ac_sk AND usr.dflt_rptg_type = 'WLT'),
-                'PCS'
-              ) = 'PCS'
-            )
-          THEN LPAD(
-            SUBSTR(ac.ac_id, INSTR(ac.ac_id, ' ', 1, 1) + 1),
-            LENGTH(ac.ac_id),
-            'x'
-          )
-          ELSE ac.ac_id
-        END
-      FROM ecp_sys_opt opt
-      WHERE opt.sys_opt_key = 'ecp.account.masking'
-    )
-    ELSE ac.ac_id
-  END AS ac_id,
+    CASE 
+        WHEN ndx.DECODER_AC_SK IS NOT NULL 
+             AND (tot_dec_ac - ndx.DECODER_AC_SK) > 0 
+        THEN DECODE(ac_id)  -- Replace with logic if needed
+        ELSE ac.ac_id
+    END AS ac_id,
 
-  CASE
-    WHEN ac.data_src_id = 7 AND get_data_mask_user_flag(p_user_sk, p_cust_sk, ac.ac_sk) = 1 THEN (
-      SELECT
-        CASE
-          WHEN ac.ac_stat_dcde = 'CLOSED' AND ac.data_src_id NOT IN (6, 7)
-          THEN 'Closed - ' || dtl.dtl_ac_type_desc
-          ELSE dtl.dtl_ac_type_desc
-        END
-      FROM npf_dtl_ac_type dtl
-      WHERE dtl.dtl_ac_type = ac.dtl_ac_type
-    )
-    WHEN ac.data_src_id = 7 AND ac.ac_stat_dcde = 'CLOSED' AND ac.data_src_id NOT IN (6, 7) THEN
-      'Closed - ' || ac.ac_desc
-    ELSE ac.ac_desc
-  END AS ac_desc,
+    prtnr.prtnr_id,
+    ac.bk_id,
+    ac.ac_type,
+    actype.ac_type_desc,
+    ac.dtl_ac_type,
+    dtltype.dtl_ac_type_desc,
+    ac.data_src_id,
+    src.data_src_desc,
 
-  alias.upd_ac_desc,
-  alias.last_upd_ts,
-  cmpnt.cmpnt_dede,
-  cmpnt.sort_nbr
+    COALESCE(alias.upd_ac_desc, ac.ac_desc) AS ac_desc,
+    alias.ac_alias,
+    ac.bse_curr_dcde,
+    (SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'CURR' AND dcde_code = ac.bse_curr_dcde) AS dcde_desc,
+    ac.ac_stat_dcde,
+    ac.svc_prvdr_desc,
+    ac.svc_prvdr_url_desc,
+    ac.liab_flag,
+    (SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'LIABFLAG' AND dcde_code = ac.liab_flag) AS liab_flag_dcde,
+    ac.real_tm_upd_flag,
+    ac.fisc_yrmnd,
+    ac.lot_rlf_meth_dcde,
+    ac.inv_obj_dcde,
+    ac.ac_prem_calc_meth_dcde,
+    ac.ac_amort_calc_meth_dcde,
+    ac.ac_acrt_calc_meth_dcde,
+    ac.ac_oid_calc_meth_dcde,
+    ac.ac_close_date,
+    ac.ac_open_date,
+    ac.npf_data_load_date,
+    ac.ac_creat_user_sk,
+    ac.cm_ac_id,
+    ac.cm_data_src_id,
+    ac.alw_marg_ac_flag,
+    ac.creat_by,
+    ac.creat_tm,
+    ac.upd_by,
+    ac.upd_tm,
+    src.extl_flg,
 
-FROM
-  npf_account ac
-JOIN npf_ac_type actype
-  ON ac.ac_type = actype.ac_type
-JOIN npf_dtl_ac_type dtltype
-  ON ac.dtl_ac_type = dtltype.dtl_ac_type
-LEFT JOIN npf_cust_ac alias
-  ON alias.ac_sk = ac.ac_sk
-LEFT JOIN npf_consl_cmpnt cmpnt
-  ON cmpnt.ac_sk = ac.ac_sk
+    -- Account attribute functions (should be replaced with LEFT JOINs or subqueries in Snowflake)
+    (SELECT b.attrib_desc || '|' || b.attrib_id
+     FROM npf_ac_attrib a 
+     JOIN npf_attribute b ON a.attrib_id = b.attrib_id
+     WHERE a.ac_sk = ac.ac_sk AND a.cust_sk = xref.cust_sk AND a.attrib_hdr_seq = 1) AS attrib_desc1,
+
+    (same as above with seq 2) AS attrib_desc2,
+    (same as above with seq 3) AS attrib_desc3,
+    (same as above with seq 4) AS attrib_desc4,
+    (same as above with seq 5) AS attrib_desc5,
+
+    -- Display alias
+    COALESCE(alias.ac_alias, ac.ac_desc) AS display_desc,
+
+    ac.ac_memo_desc,
+    pi.indx_sk,
+    pi.indx_desc
+
+FROM 
+    npf_ac_cust_user xref
+JOIN npf_account ac ON ac.ac_sk = xref.ac_sk
+JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
+JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
+LEFT JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = xref.cust_sk
+LEFT JOIN npf_perf_indx acp ON acp.ac_sk = ac.ac_sk
+LEFT JOIN npf_perf_indx pi ON pi.indx_sk = acp.indx_sk
+LEFT JOIN npf_decoder_xref ndx ON ndx.cust_sk = xref.cust_sk
+LEFT JOIN npf_mstr_prtnr_ac prtnr ON prtnr.ac_sk = ac.ac_sk
 
 WHERE
-  ac.ac_stat_dcde = 'ACT'
-  AND alias.cust_sk = p_cust_sk
-  AND EXISTS (
-    SELECT 1
-    FROM cust_user_xref xref
-    WHERE xref.cust_sk = alias.cust_sk
-      AND xref.user_sk = p_user_sk
-  );
+    xref.user_sk = :v_user_sk
+    AND xref.cust_sk = :p_cust_sk
+    AND src.data_src_id < 12
+    -- Add more conditions from your input params if needed (like :p_ac_type, :p_attrb_1, etc.)
