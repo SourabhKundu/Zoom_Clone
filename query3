@@ -1,8 +1,39 @@
-Procedure: get_account_dtls  final query
 
 SELECT
     ac.ac_sk,
-    DECODE(ac.data_src_id, 7, npf_data_mask_pkg.get_masked_acid_for_acsk(NULL, p_cust_sk, ac.ac_sk), ac.ac_id) AS ac_id,
+
+    CASE 
+        WHEN ac.data_src_id = 7 THEN
+            (
+                SELECT 
+                    CASE 
+                        WHEN (
+                            SELECT get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) FROM dual
+                        ) = 1 THEN 
+                            (
+                                SELECT 
+                                    CASE 
+                                        WHEN UPPER(SYS_OPT_VAL) = 'Y' AND LENGTH(ac.ac_id) > 4 AND (
+                                            SELECT COALESCE(
+                                                (SELECT DFLT_RPTG_TYPE FROM NPF_USER WHERE USER_SK = p_user_sk AND ROWNUM = 1),
+                                                (SELECT USR.DFLT_RPTG_TYPE FROM NPF_USER USR, NPF_AC_CUST_USER ACU 
+                                                 WHERE USR.USER_SK = ACU.USER_SK AND ACU.CUST_SK = p_cust_sk 
+                                                 AND ACU.AC_SK = ac.ac_sk AND ROWNUM = 1)
+                                            ) = 'PCS'
+                                        THEN 
+                                            LPAD(SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4), LENGTH(ac.ac_id), 'x')
+                                        ELSE ac.ac_id
+                                    END
+                                FROM ECP_SYS_OPT 
+                                WHERE SYS_OPT_KEY = 'ecp.account.masking'
+                            )
+                        ELSE ac.ac_id
+                    END
+                FROM dual
+            )
+        ELSE ac.ac_id
+    END AS ac_id,
+
     ac.bk_id,
     ac.ac_type,
     actype.ac_type_desc,
@@ -11,6 +42,7 @@ SELECT
     dtltype.ac_type_grp_dcde,
     ac.data_src_id,
     dtltype.prod_info_url_desc,
+
     (
         SELECT
             CASE
@@ -40,7 +72,35 @@ SELECT
         ELSE src.ac_dtl_src_desc
     END AS data_src_desc,
 
-    NVL(alias.upd_ac_desc, DECODE(ac.data_src_id, 7, ac.ac_desc, npf_data_mask_pkg.get_masked_ac_name(NULL, p_cust_sk, ac.ac_sk, ac.ac_desc))) AS ac_desc,
+    NVL(
+        alias.upd_ac_desc,
+        CASE 
+            WHEN ac.data_src_id = 7 THEN ac.ac_desc
+            ELSE (
+                SELECT 
+                    CASE 
+                        WHEN (
+                            SELECT get_data_mask_user_flag(NULL, p_cust_sk, ac.ac_sk) FROM dual
+                        ) = 1 THEN 
+                            (
+                                SELECT 
+                                    CASE 
+                                        WHEN ac_stat_dcde = 'CLOSED' AND data_src_id NOT IN (6,7)
+                                        THEN 'Closed - ' || dtl_ac_type_desc
+                                        ELSE dtl_ac_type_desc
+                                    END
+                                FROM npf_account a
+                                JOIN npf_dtl_ac_type d ON a.dtl_ac_type = d.dtl_ac_type
+                                WHERE a.ac_sk = ac.ac_sk
+                                FETCH FIRST 1 ROW ONLY
+                            )
+                        ELSE ac.ac_desc
+                    END
+                FROM dual
+            )
+        END
+    ) AS ac_desc,
+
     alias.ac_alias,
     ac.bse_curr_dcde,
 
@@ -177,3 +237,4 @@ WHERE
     AND EXISTS (
         SELECT 1 FROM npf_ac_cust_user WHERE cust_sk = p_cust_sk AND user_sk = p_user_sk
     );
+
