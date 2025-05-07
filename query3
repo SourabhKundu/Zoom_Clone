@@ -1,37 +1,17 @@
-
 SELECT
     ac.ac_sk,
     CASE 
         WHEN ac.data_src_id = 7 
-             AND 
-(
-  SELECT COUNT(*) 
-  FROM REA_ENRL_APPL_F_TEST APPL
-  JOIN NTA_REA_ENRL REA_ENRL ON APPL.I_ENRL = REA_ENRL.I_ENRL
-  JOIN NTA_ENRL ENRL ON ENRL.I_REA_ENRL = REA_ENRL.I_ENRL
-  JOIN NPF_USER USR ON USR.LOGIN_ID = ENRL.I_ENRL_ASG
-  JOIN NPF_AC_CUST_USER ACU ON USR.USER_SK = ACU.USER_SK
-  WHERE 
-    USR.USER_SK = p_user_sk
-    AND ACU.CUST_SK = p_cust_sk
-    AND ACU.AC_SK = ac.ac_sk
-    AND APPL.F_TEST = 1
-) > 0
- = 1
-             AND (
-                 SELECT UPPER(SYS_OPT_VAL)
-                 FROM ECP_SYS_OPT 
-                 WHERE SYS_OPT_KEY = 'ecp.account.masking'
-                 LIMIT 1
-             ) = 'Y'
+             AND :p_test_user_flag = 1
+             AND :p_mask_ac_id = 'Y'
              AND LENGTH(ac.ac_id) > 4
              AND (
                  COALESCE(
-                     (SELECT DFLT_RPTG_TYPE FROM NPF_USER WHERE USER_SK = p_user_sk LIMIT 1),
+                     (SELECT DFLT_RPTG_TYPE FROM NPF_USER WHERE USER_SK = :p_user_sk LIMIT 1),
                      (SELECT USR.DFLT_RPTG_TYPE 
                       FROM NPF_USER USR 
                       JOIN NPF_AC_CUST_USER ACU ON USR.USER_SK = ACU.USER_SK
-                      WHERE ACU.CUST_SK = p_cust_sk AND ACU.AC_SK = ac.ac_sk
+                      WHERE ACU.CUST_SK = :p_cust_sk AND ACU.AC_SK = ac.ac_sk
                       LIMIT 1)
                  )
              ) = 'PCS'
@@ -81,21 +61,7 @@ SELECT
         alias.upd_ac_desc,
         CASE 
             WHEN ac.data_src_id = 7 THEN ac.ac_desc
-            WHEN 
-(
-  SELECT COUNT(*) 
-  FROM REA_ENRL_APPL_F_TEST APPL
-  JOIN NTA_REA_ENRL REA_ENRL ON APPL.I_ENRL = REA_ENRL.I_ENRL
-  JOIN NTA_ENRL ENRL ON ENRL.I_REA_ENRL = REA_ENRL.I_ENRL
-  JOIN NPF_USER USR ON USR.LOGIN_ID = ENRL.I_ENRL_ASG
-  JOIN NPF_AC_CUST_USER ACU ON USR.USER_SK = ACU.USER_SK
-  WHERE 
-    USR.USER_SK = p_user_sk
-    AND ACU.CUST_SK = p_cust_sk
-    AND ACU.AC_SK = ac.ac_sk
-    AND APPL.F_TEST = 1
-) > 0
- = 1 THEN (
+            WHEN :p_test_user_flag = 1 THEN (
                 SELECT 
                     CASE 
                         WHEN a.ac_stat_dcde = 'CLOSED' AND a.data_src_id NOT IN (6,7)
@@ -235,7 +201,7 @@ SELECT
 
 FROM
     npf_account ac
-    LEFT JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = p_cust_sk
+    LEFT JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = :p_cust_sk
     LEFT JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
     LEFT JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
     LEFT JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
@@ -243,7 +209,7 @@ FROM
     LEFT JOIN npf_perf_indx pi ON acp.INDX_SK = pi.INDX_SK
     LEFT JOIN npf_asset ast ON ast.instr_id = LPAD(ac.ac_sk, 11, '0')
 WHERE
-    ac.ac_sk = p_ac_sk
+    ac.ac_sk = :p_ac_sk
     AND EXISTS (
-        SELECT 1 FROM npf_ac_cust_user WHERE cust_sk = p_cust_sk AND user_sk = p_user_sk
+        SELECT 1 FROM npf_ac_cust_user WHERE cust_sk = :p_cust_sk AND user_sk = :p_user_sk
     );
