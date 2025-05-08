@@ -1,0 +1,140 @@
+
+WITH account_type_info AS (
+    SELECT
+        ac.ac_sk,
+        ac.dtl_ac_type,
+        ac.ac_desc,
+        ac.data_src_id,
+        CASE 
+            WHEN ac.ac_stat_dcde IN ('OPEN', 'REOPEN', 'OPENDEP', 'NOT PAID', 'DEMAND', 'CLOSETAX') THEN 'Y'
+            ELSE 'N'
+        END AS ac_active,
+        typ.ac_type_grp_dcde
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type typ 
+        ON ac.dtl_ac_type = typ.dtl_ac_type
+),
+
+transaction_summary AS (
+    SELECT
+        nt.ac_sk,
+        ROUND(SUM(CASE WHEN nt.net_cash_bse_amt > 0 THEN nt.net_cash_bse_amt ELSE 0 END), 2) AS credit_amt,
+        ROUND(SUM(CASE WHEN nt.net_cash_bse_amt < 0 THEN nt.net_cash_bse_amt ELSE 0 END), 2) AS debit_amt
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_transaction nt
+    WHERE nt.net_cash_bse_amt != 0
+      AND nt.rpt_incl_date_time BETWEEN TO_DATE('2024-01-01') AND TO_DATE('2024-03-30')
+    GROUP BY nt.ac_sk
+),
+
+valuation_summary AS (
+    SELECT
+        np.ac_sk,
+        np.valn_as_of_date,
+        SUM(COALESCE(np.mv_bse_amt, 0)) AS tot_mv_bse_amt
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_position np
+    WHERE np.ac_sk = '123456'
+      AND np.valn_as_of_date IN ('2024-01-01', '2024-03-31')
+    GROUP BY np.ac_sk, np.valn_as_of_date
+),
+
+closing_balances AS (
+    SELECT
+        trg.ac_sk,
+        trg.valn_as_of_date,
+        trg.valn_run_time,
+        trg.ac_mv_bse_amt AS close_ldgr_bal_amt
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum trg
+    JOIN (
+        SELECT ac_sk, valn_as_of_date, valn_run_time
+        FROM (
+            SELECT ac_sk, valn_as_of_date, valn_run_time,
+                   ROW_NUMBER() OVER (PARTITION BY ac_sk ORDER BY valn_freq_dcde DESC, valn_appr_flag DESC, valn_run_time DESC) AS rn
+            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum
+            WHERE ac_sk = '123456'
+              AND valn_as_of_date <= '2024-03-31'
+        ) WHERE rn = 1
+    ) src ON trg.ac_sk = src.ac_sk 
+         AND trg.valn_as_of_date = src.valn_as_of_date 
+         AND trg.valn_run_time = src.valn_run_time
+),
+
+final_output AS (
+    SELECT
+        vs1.ac_sk,
+        vs1.tot_mv_bse_amt                         AS po_lst_tot_mv_amt_a,
+        vs2.tot_mv_bse_amt                         AS po_beg_tot_mv_amt_a,
+        ts.credit_amt                              AS po_credit_amt_a,
+        ts.debit_amt                               AS po_debit_amt_a,
+        cb.close_ldgr_bal_amt                      AS po_close_ldgr_bal_amt_a,
+        (vs2.tot_mv_bse_amt + ts.credit_amt + ts.debit_amt) AS po_curr_bal_a,
+
+        CASE 
+            WHEN 'CD' IN ('MMD', 'ICK')
+            THEN dep.apy_lrt_amt * 0.01
+            ELSE NULL
+        END AS po_curr_apy_a,
+
+        CASE 
+            WHEN 'CD' IN ('CHK', 'ACK')
+                 AND 'SAV' != 'SAV'
+                 AND dep.pra_cr_lim_amt > 0
+            THEN ROUND(dep.pra_cr_lim_amt, 2)
+            ELSE NULL
+        END AS po_max_nl_amt_a,
+
+        CASE 
+            WHEN 'CD' IN ('CHK', 'ACK')
+                 AND dep.pra_used_amt > 0
+            THEN ROUND(dep.pra_used_amt, 2)
+            ELSE NULL
+        END AS po_nl_used_amt_a,
+
+        CASE 
+            WHEN 'CD' IN ('CHK', 'ACK')
+                 AND dep.pra_cr_lim_amt > 0
+            THEN ROUND(dep.pra_avail_amt, 2)
+            ELSE NULL
+        END AS po_avail_cr_amt_a,
+
+        CASE 
+            WHEN 'CD' IN ('CD', 'MMD', 'ICK')
+            THEN ROUND(dep.curr_rt_amt * 0.01)
+            ELSE NULL
+        END AS po_curr_rt_amt_a,
+
+        CASE 
+            WHEN 'CD' IN ('CD', 'MMD', 'ICK')
+            THEN ROUND(dep.int_pd_ytd_amt, 2)
+            ELSE NULL
+        END AS po_int_pd_ytd_amt_n,
+
+        CASE 
+            WHEN 'CD' IN ('CD', 'MMD', 'ICK')
+            THEN ROUND(dep.txw_ytd_amt, 2)
+            ELSE NULL
+        END AS po_txw_ytd_amt_n,
+
+        CASE 
+            WHEN 'CD' IN ('MMD', 'ICK')
+            THEN dep.apy_lrt_lst_per_amt * 0.01
+            ELSE NULL
+        END AS po_close_prd_apy_a,
+
+        DECODE('CD', 'CD', dep.term_cd_qty_nbr || ' ' || npf_util_pkg.get_doc_cd_desc('TERM', dep.term_cd_dcde), NULL) AS po_cd_term_c,
+        DECODE('CD', 'CD', dep.matur_cde_date, NULL) AS po_mature_dt_date,
+        DECODE('CD', 'CD', ROUND(dep.lst_int_pmt_amt, 2), NULL) AS po_lst_int_pmt_amt_a
+
+    FROM valuation_summary vs1
+    LEFT JOIN valuation_summary vs2 
+        ON vs2.ac_sk = vs1.ac_sk AND vs2.valn_as_of_date = '2024-01-01'
+    LEFT JOIN transaction_summary ts 
+        ON ts.ac_sk = vs1.ac_sk
+    LEFT JOIN closing_balances cb 
+        ON cb.ac_sk = vs1.ac_sk
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_deposit dep 
+        ON dep.ac_sk = vs1.ac_sk
+    WHERE vs1.ac_sk = '123456' 
+      AND vs1.valn_as_of_date = '2024-03-31'
+)
+
+SELECT * FROM final_output;
