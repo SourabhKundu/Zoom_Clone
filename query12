@@ -22,7 +22,7 @@ transaction_summary AS (
         ROUND(SUM(CASE WHEN nt.net_cash_bse_amt < 0 THEN nt.net_cash_bse_amt ELSE 0 END), 2) AS debit_amt
     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_transaction nt
     WHERE nt.net_cash_bse_amt != 0
-      AND nt.rpt_incl_date_time BETWEEN TO_DATE('2024-01-01') AND TO_DATE('2024-03-30')
+      AND nt.rpt_incl_date_time BETWEEN TO_DATE(:v_mon_st_date) AND TO_DATE(:v_prev_bus_day)
     GROUP BY nt.ac_sk
 ),
 
@@ -32,8 +32,8 @@ valuation_summary AS (
         np.valn_as_of_date,
         SUM(COALESCE(np.mv_bse_amt, 0)) AS tot_mv_bse_amt
     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_position np
-    WHERE np.ac_sk = '123456'
-      AND np.valn_as_of_date IN ('2024-01-01', '2024-03-31')
+    WHERE np.ac_sk = :v_ac_sk
+      AND np.valn_as_of_date IN (:v_beg_valn_as_of_date, :v_lst_valn_as_of_date)
     GROUP BY np.ac_sk, np.valn_as_of_date
 ),
 
@@ -50,8 +50,8 @@ closing_balances AS (
             SELECT ac_sk, valn_as_of_date, valn_run_time,
                    ROW_NUMBER() OVER (PARTITION BY ac_sk ORDER BY valn_freq_dcde DESC, valn_appr_flag DESC, valn_run_time DESC) AS rn
             FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum
-            WHERE ac_sk = '123456'
-              AND valn_as_of_date <= '2024-03-31'
+            WHERE ac_sk = :v_ac_sk
+              AND valn_as_of_date <= :v_lst_valn_as_of_date
         ) WHERE rn = 1
     ) src ON trg.ac_sk = src.ac_sk 
          AND trg.valn_as_of_date = src.valn_as_of_date 
@@ -69,72 +69,72 @@ final_output AS (
         (vs2.tot_mv_bse_amt + ts.credit_amt + ts.debit_amt) AS po_curr_bal_a,
 
         CASE 
-            WHEN 'CD' IN ('MMD', 'ICK')
-            THEN dep.apy_lrt_amt * 0.01
+            WHEN :v_det_ac_type_a IN (:pg_det_type_mmd_c, :pg_det_type_ick_c)
+            THEN dep.apy_rt_amt * :pg_percent_val_n
             ELSE NULL
         END AS po_curr_apy_a,
 
         CASE 
-            WHEN 'CD' IN ('CHK', 'ACK')
-                 AND 'SAV' != 'SAV'
+            WHEN :v_det_ac_type_a IN (:pg_det_type_chk_c, :pg_det_type_ack_c)
+                 AND :v_dtl_ac_type != :pg_det_type_sav_c
                  AND dep.pra_cr_lim_amt > 0
-            THEN ROUND(dep.pra_cr_lim_amt, 2)
+            THEN ROUND(dep.pra_cr_lim_amt, :pg_std_rounding)
             ELSE NULL
         END AS po_max_nl_amt_a,
 
         CASE 
-            WHEN 'CD' IN ('CHK', 'ACK')
+            WHEN :v_det_ac_type_a IN (:pg_det_type_chk_c, :pg_det_type_ack_c)
                  AND dep.pra_used_amt > 0
-            THEN ROUND(dep.pra_used_amt, 2)
+            THEN ROUND(dep.pra_used_amt, :pg_std_rounding)
             ELSE NULL
         END AS po_nl_used_amt_a,
 
         CASE 
-            WHEN 'CD' IN ('CHK', 'ACK')
+            WHEN :v_det_ac_type_a IN (:pg_det_type_chk_c, :pg_det_type_ack_c)
                  AND dep.pra_cr_lim_amt > 0
-            THEN ROUND(dep.pra_avail_amt, 2)
+            THEN ROUND(dep.pra_avail_amt, :pg_std_rounding)
             ELSE NULL
         END AS po_avail_cr_amt_a,
 
         CASE 
-            WHEN 'CD' IN ('CD', 'MMD', 'ICK')
-            THEN ROUND(dep.curr_rt_amt * 0.01)
+            WHEN :v_det_ac_type_a IN (:pg_det_type_cd_c, :pg_det_type_mmd_c, :pg_det_type_ick_c)
+            THEN ROUND(dep.cur_rt_amt * :pg_percent_val_n)
             ELSE NULL
         END AS po_curr_rt_amt_a,
 
         CASE 
-            WHEN 'CD' IN ('CD', 'MMD', 'ICK')
-            THEN ROUND(dep.int_pd_ytd_amt, 2)
+            WHEN :v_det_ac_type_a IN (:pg_det_type_cd_c, :pg_det_type_mmd_c, :pg_det_type_ick_c)
+            THEN ROUND(dep.int_pd_ytd_amt, :pg_std_rounding)
             ELSE NULL
         END AS po_int_pd_ytd_amt_n,
 
         CASE 
-            WHEN 'CD' IN ('CD', 'MMD', 'ICK')
-            THEN ROUND(dep.txw_ytd_amt, 2)
+            WHEN :v_det_ac_type_a IN (:pg_det_type_cd_c, :pg_det_type_mmd_c, :pg_det_type_ick_c)
+            THEN ROUND(dep.txw_ytd_amt, :pg_std_rounding)
             ELSE NULL
         END AS po_txw_ytd_amt_n,
 
         CASE 
-            WHEN 'CD' IN ('MMD', 'ICK')
-            THEN dep.apy_lrt_lst_per_amt * 0.01
+            WHEN :v_det_ac_type_a IN (:pg_det_type_mmd_c, :pg_det_type_ick_c)
+            THEN dep.apy_rt_lst_per_amt * :pg_percent_val_n
             ELSE NULL
         END AS po_close_prd_apy_a,
 
-        DECODE('CD', 'CD', dep.term_cd_qty_nbr || ' ' || npf_util_pkg.get_doc_cd_desc('TERM', dep.term_cd_dcde), NULL) AS po_cd_term_c,
-        DECODE('CD', 'CD', dep.matur_cde_date, NULL) AS po_mature_dt_date,
-        DECODE('CD', 'CD', ROUND(dep.lst_int_pmt_amt, 2), NULL) AS po_lst_int_pmt_amt_a
+        DECODE(:v_det_ac_type_a, :pg_det_type_cd_c, dep.term_cd_qty_nbr || ' ' , NULL) AS po_cd_term_c,
+        DECODE(:v_det_ac_type_a, :pg_det_type_cd_c, dep.matur_cde_date, NULL) AS po_mature_dt_date,
+        DECODE(:v_det_ac_type_a, :pg_det_type_cd_c, ROUND(dep.lst_int_pmt_amt, :pg_std_rounding), NULL) AS po_lst_int_pmt_amt_a
 
     FROM valuation_summary vs1
     LEFT JOIN valuation_summary vs2 
-        ON vs2.ac_sk = vs1.ac_sk AND vs2.valn_as_of_date = '2024-01-01'
+        ON vs2.ac_sk = vs1.ac_sk AND vs2.valn_as_of_date = :v_beg_valn_as_of_date
     LEFT JOIN transaction_summary ts 
         ON ts.ac_sk = vs1.ac_sk
     LEFT JOIN closing_balances cb 
         ON cb.ac_sk = vs1.ac_sk
     JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_deposit dep 
         ON dep.ac_sk = vs1.ac_sk
-    WHERE vs1.ac_sk = '123456' 
-      AND vs1.valn_as_of_date = '2024-03-31'
+    WHERE vs1.ac_sk = :v_ac_sk 
+      AND vs1.valn_as_of_date = :v_lst_valn_as_of_date
 )
 
 SELECT * FROM final_output;
