@@ -1,8 +1,10 @@
+Decompose
+
+
 WITH base_data AS (
     SELECT
         ac.ac_sk,
 
-        /* Masking logic for ac_id (inlined from get_masked_ac_id) */
         CASE 
             WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN 
                 SUBSTR(LPAD(ac.ac_id, 20, '0'), LENGTH(LPAD(ac.ac_id, 20, '0')) - 3, 4)
@@ -32,15 +34,31 @@ WITH base_data AS (
 
         alias.ac_alias,
 
-        /* Masking logic for ac_desc (remains as-is, handled separately) */
         NVL(
             alias.upd_ac_desc,
             CASE 
-                WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN 
-                    get_masked_ac_name(NULL, :p_cust_sk, ac.ac_sk, ac.ac_desc)
+                WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN
+                    (
+                        SELECT
+                            CASE 
+                                WHEN ac_stat = 'CLOSED' AND data_src NOT IN (6, 7) 
+                                THEN 'Closed - ' || dtl_ac_type_desc
+                                ELSE dtl_ac_type_desc
+                            END
+                        FROM (
+                            SELECT 
+                                ac_stat_dcde AS ac_stat, 
+                                data_src_id AS data_src,
+                                dtl.dtl_ac_type_desc
+                            FROM npf_account ac2
+                            JOIN npf_dtl_ac_type dtl 
+                              ON ac2.dtl_ac_type = dtl.dtl_ac_type
+                            WHERE ac2.ac_sk = ac.ac_sk
+                        )
+                    )
                 ELSE 
                     CASE 
-                        WHEN :v_mask_ac = 'Y' AND LENGTH(ac.ac_id) > 4 AND (
+                        WHEN :v_mask_ac = 'Y' AND LENGTH(ac.ac_desc) > 4 AND (
                             COALESCE(
                                 (SELECT usr.dflt_rptg_type 
                                  FROM npf_user usr 
@@ -118,3 +136,4 @@ base_consols AS (
 SELECT * FROM base_data
 UNION ALL
 SELECT * FROM base_consols;
+
