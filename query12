@@ -1,31 +1,21 @@
-Decompose
-
-
 WITH base_data AS (
     SELECT
         ac.ac_sk,
-
         CASE 
-            WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN 
+            WHEN :p_data_mask_user_flag = 1 THEN 
                 SUBSTR(LPAD(ac.ac_id, 20, '0'), LENGTH(LPAD(ac.ac_id, 20, '0')) - 3, 4)
             ELSE
                 CASE 
                     WHEN :v_mask_ac = 'Y' AND LENGTH(ac.ac_id) > 4 AND (
                         COALESCE(
+                            (SELECT usr.dflt_rptg_type FROM npf_user usr WHERE usr.user_sk = :p_user_sk),
                             (SELECT usr.dflt_rptg_type 
                              FROM npf_user usr 
-                             WHERE usr.user_sk = :p_user_sk),
-                            (SELECT usr.dflt_rptg_type 
-                             FROM npf_user usr 
-                             JOIN npf_ac_cust_user acu 
-                               ON usr.user_sk = acu.user_sk 
-                             WHERE acu.cust_sk = :p_cust_sk 
-                               AND acu.ac_sk = ac.ac_sk 
-                               AND usr.dflt_rptg_type = 'WLT'
-                             FETCH FIRST 1 ROWS ONLY)
+                             JOIN npf_ac_cust_user acu ON usr.user_sk = acu.user_sk 
+                             WHERE acu.cust_sk = :p_cust_sk AND acu.ac_sk = ac.ac_sk AND usr.dflt_rptg_type = 'WLT'
+                             LIMIT 1)
                         ) = 'PCS'
-                    ) 
-                    THEN 
+                    ) THEN 
                         LPAD(SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4), LENGTH(ac.ac_id), 'x')
                     ELSE 
                         ac.ac_id
@@ -37,43 +27,36 @@ WITH base_data AS (
         NVL(
             alias.upd_ac_desc,
             CASE 
-                WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN
-                    (
-                        SELECT
-                            CASE 
-                                WHEN ac_stat = 'CLOSED' AND data_src NOT IN (6, 7) 
-                                THEN 'Closed - ' || dtl_ac_type_desc
-                                ELSE dtl_ac_type_desc
-                            END
-                        FROM (
-                            SELECT 
-                                ac_stat_dcde AS ac_stat, 
-                                data_src_id AS data_src,
-                                dtl.dtl_ac_type_desc
-                            FROM npf_account ac2
-                            JOIN npf_dtl_ac_type dtl 
-                              ON ac2.dtl_ac_type = dtl.dtl_ac_type
-                            WHERE ac2.ac_sk = ac.ac_sk
-                        )
-                    )
+                WHEN :p_data_mask_user_flag = 1 THEN (
+                    SELECT 
+                        CASE 
+                            WHEN ac_stat = 'CLOSED' AND data_src NOT IN (6, 7) THEN 
+                                'Closed - ' || dtl_ac_type_desc
+                            ELSE 
+                                dtl_ac_type_desc
+                        END
+                    FROM (
+                        SELECT 
+                            ac2.ac_stat_dcde AS ac_stat, 
+                            ac2.data_src_id AS data_src, 
+                            dtl.dtl_ac_type_desc
+                        FROM npf_account ac2
+                        JOIN npf_dtl_ac_type dtl ON ac2.dtl_ac_type = dtl.dtl_ac_type
+                        WHERE ac2.ac_sk = ac.ac_sk
+                    ) sub
+                )
                 ELSE 
                     CASE 
                         WHEN :v_mask_ac = 'Y' AND LENGTH(ac.ac_desc) > 4 AND (
                             COALESCE(
+                                (SELECT usr.dflt_rptg_type FROM npf_user usr WHERE usr.user_sk = :p_user_sk),
                                 (SELECT usr.dflt_rptg_type 
                                  FROM npf_user usr 
-                                 WHERE usr.user_sk = :p_user_sk),
-                                (SELECT usr.dflt_rptg_type 
-                                 FROM npf_user usr 
-                                 JOIN npf_ac_cust_user acu 
-                                   ON usr.user_sk = acu.user_sk 
-                                 WHERE acu.cust_sk = :p_cust_sk 
-                                   AND acu.ac_sk = ac.ac_sk 
-                                   AND usr.dflt_rptg_type = 'WLT'
-                                 FETCH FIRST 1 ROWS ONLY)
+                                 JOIN npf_ac_cust_user acu ON usr.user_sk = acu.user_sk 
+                                 WHERE acu.cust_sk = :p_cust_sk AND acu.ac_sk = ac.ac_sk AND usr.dflt_rptg_type = 'WLT'
+                                 LIMIT 1)
                             ) = 'PCS'
-                        ) 
-                        THEN 
+                        ) THEN 
                             LPAD(SUBSTR(ac.ac_desc, INSTR(ac.ac_desc, '(', 1, 1) - 4), LENGTH(ac.ac_desc), 'x')
                         ELSE 
                             ac.ac_desc
@@ -136,4 +119,3 @@ base_consols AS (
 SELECT * FROM base_data
 UNION ALL
 SELECT * FROM base_consols;
-
