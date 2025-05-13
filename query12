@@ -1,6 +1,18 @@
-WITH base_data AS (
+WITH ac_masking AS (
     SELECT
         ac.ac_sk,
+        CASE 
+            WHEN ac.ac_stat_dcde = 'CLOSED' AND ac.data_src_id NOT IN (6, 7) 
+            THEN 'Closed - ' || dtl.dtl_ac_type_desc
+            ELSE dtl.dtl_ac_type_desc
+        END AS masked_ac_desc
+    FROM npf_account ac
+    JOIN npf_dtl_ac_type dtl ON ac.dtl_ac_type = dtl.dtl_ac_type
+),
+base_data AS (
+    SELECT
+        ac.ac_sk,
+
         CASE 
             WHEN :p_data_mask_user_flag = 1 THEN 
                 SUBSTR(LPAD(ac.ac_id, 20, '0'), LENGTH(LPAD(ac.ac_id, 20, '0')) - 3, 4)
@@ -12,11 +24,13 @@ WITH base_data AS (
                             (SELECT usr.dflt_rptg_type 
                              FROM npf_user usr 
                              JOIN npf_ac_cust_user acu ON usr.user_sk = acu.user_sk 
-                             WHERE acu.cust_sk = :p_cust_sk AND acu.ac_sk = ac.ac_sk AND usr.dflt_rptg_type = 'WLT'
+                             WHERE acu.cust_sk = :p_cust_sk 
+                               AND acu.ac_sk = ac.ac_sk 
+                               AND usr.dflt_rptg_type = 'WLT'
                              LIMIT 1)
                         ) = 'PCS'
                     ) THEN 
-                        LPAD(SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4), LENGTH(ac.ac_id), 'x')
+                        LPAD(SUBSTR(ac.ac_id, POSITION('(' IN ac.ac_id) - 4), LENGTH(ac.ac_id), 'x')
                     ELSE 
                         ac.ac_id
                 END
@@ -27,24 +41,8 @@ WITH base_data AS (
         NVL(
             alias.upd_ac_desc,
             CASE 
-                WHEN :p_data_mask_user_flag = 1 THEN (
-                    SELECT 
-                        CASE 
-                            WHEN ac_stat = 'CLOSED' AND data_src NOT IN (6, 7) THEN 
-                                'Closed - ' || dtl_ac_type_desc
-                            ELSE 
-                                dtl_ac_type_desc
-                        END
-                    FROM (
-                        SELECT 
-                            ac2.ac_stat_dcde AS ac_stat, 
-                            ac2.data_src_id AS data_src, 
-                            dtl.dtl_ac_type_desc
-                        FROM npf_account ac2
-                        JOIN npf_dtl_ac_type dtl ON ac2.dtl_ac_type = dtl.dtl_ac_type
-                        WHERE ac2.ac_sk = ac.ac_sk
-                    ) sub
-                )
+                WHEN :p_data_mask_user_flag = 1 
+                THEN am.masked_ac_desc
                 ELSE 
                     CASE 
                         WHEN :v_mask_ac = 'Y' AND LENGTH(ac.ac_desc) > 4 AND (
@@ -53,13 +51,14 @@ WITH base_data AS (
                                 (SELECT usr.dflt_rptg_type 
                                  FROM npf_user usr 
                                  JOIN npf_ac_cust_user acu ON usr.user_sk = acu.user_sk 
-                                 WHERE acu.cust_sk = :p_cust_sk AND acu.ac_sk = ac.ac_sk AND usr.dflt_rptg_type = 'WLT'
+                                 WHERE acu.cust_sk = :p_cust_sk 
+                                   AND acu.ac_sk = ac.ac_sk 
+                                   AND usr.dflt_rptg_type = 'WLT'
                                  LIMIT 1)
                             ) = 'PCS'
-                        ) THEN 
-                            LPAD(SUBSTR(ac.ac_desc, INSTR(ac.ac_desc, '(', 1, 1) - 4), LENGTH(ac.ac_desc), 'x')
-                        ELSE 
-                            ac.ac_desc
+                        ) 
+                        THEN LPAD(SUBSTR(ac.ac_desc, POSITION('(' IN ac.ac_desc) - 4), LENGTH(ac.ac_desc), 'x')
+                        ELSE ac.ac_desc
                     END
             END
         ) AS ac_desc,
@@ -74,6 +73,7 @@ WITH base_data AS (
     JOIN npf_consl consl ON consl.consl_sk IN ('12345')
     JOIN npf_consl_cmpnt cmpnt ON cmpnt.consl_sk = consl.consl_sk
     JOIN npf_ac_cust_user xref ON xref.ac_sk = ac.ac_sk
+    LEFT JOIN ac_masking am ON ac.ac_sk = am.ac_sk
     WHERE 
         cmpnt.cmpnt_dcde = 'ACCOUNT'
         AND cmpnt.cmpnt_sk_val = ac.ac_sk
