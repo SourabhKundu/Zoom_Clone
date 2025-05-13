@@ -2,33 +2,66 @@ WITH base_data AS (
     SELECT
         ac.ac_sk,
         CASE 
-            WHEN 'WLT' = 'WLT' OR ac.data_src_id = 7 THEN ac.ac_id
-            ELSE NPF_DATA_MASK_PKG.GET_MASKED_ACID_FOR_ACSK('ABC123', 'CUST123', ac.ac_sk)
+            WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN 
+                get_masked_ac_id(ac.ac_id)
+            ELSE
+                CASE 
+                    WHEN :v_mask_ac = 'Y' AND LENGTH(ac.ac_id) > 4 AND (
+                        COALESCE(
+                            (SELECT usr.dflt_rptg_type 
+                             FROM npf_user usr 
+                             WHERE usr.user_sk = :p_user_sk),
+                            (SELECT usr.dflt_rptg_type 
+                             FROM npf_user usr 
+                             JOIN npf_ac_cust_user acu 
+                               ON usr.user_sk = acu.user_sk 
+                             WHERE acu.cust_sk = :p_cust_sk 
+                               AND acu.ac_sk = ac.ac_sk 
+                               AND usr.dflt_rptg_type = 'WLT'
+                             FETCH FIRST 1 ROWS ONLY)
+                        ) = 'PCS'
+                    ) 
+                    THEN 
+                        LPAD(SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4), LENGTH(ac.ac_id), 'x')
+                    ELSE 
+                        ac.ac_id
+                END
         END AS ac_id,
+
         alias.ac_alias,
         NVL(
             alias.upd_ac_desc,
             CASE 
-                WHEN 'WLT' = 'WLT' OR ac.data_src_id = 7 THEN ac.ac_desc
-                ELSE NPF_DATA_MASK_PKG.GET_MASKED_AC_NAME('ABC123', 'CUST123', ac.ac_sk, ac.ac_desc)
+                WHEN get_data_mask_user_flag(:p_user_sk, :p_cust_sk, ac.ac_sk) = 1 THEN
+                    CASE 
+                        WHEN ac.ac_stat_dcde = 'CLOSED' AND ac.data_src_id NOT IN (6, 7) THEN 
+                            'Closed - ' || dtltype.dtl_ac_type_desc
+                        ELSE 
+                            dtltype.dtl_ac_type_desc
+                    END
+                ELSE 
+                    ac.ac_desc
             END
         ) AS ac_desc,
+
         cmpnt.cmpnt_dcde,
         cmpnt.sort_nbr,
         ac.data_src_id,
         ac.bse_curr_dcde
+
     FROM npf_account ac
     JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk
     JOIN npf_consl consl ON consl.consl_sk IN ('12345')
     JOIN npf_consl_cmpnt cmpnt ON cmpnt.consl_sk = consl.consl_sk
     JOIN npf_ac_cust_user xref ON xref.ac_sk = ac.ac_sk
+    JOIN npf_dtl_ac_type dtltype ON ac.dtl_ac_type = dtltype.dtl_ac_type
     WHERE 
         cmpnt.cmpnt_dcde = 'ACCOUNT'
         AND cmpnt.cmpnt_sk_val = ac.ac_sk
         AND cmpnt.consl_cmpnt_stat_dcde = 'ACTIVE'
         AND alias.cust_sk = consl.cust_sk
-        AND xref.user_sk = 'ABC123'
-        AND xref.cust_sk = 'CUST123'
+        AND xref.user_sk = :p_user_sk
+        AND xref.cust_sk = :p_cust_sk
         AND NOT EXISTS (
             SELECT 1
             FROM npf_account ac2
@@ -43,7 +76,7 @@ WITH base_data AS (
                   FROM npf_ac_cust_user acu
                   WHERE acu.ac_sk = ac2.ac_sk
                     AND acu.cust_sk = consl2.cust_sk
-                    AND acu.user_sk = 'ABC123'
+                    AND acu.user_sk = :p_user_sk
               )
         )
 ),
