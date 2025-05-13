@@ -1,33 +1,331 @@
-SELECT
-  ac.ac_sk,
-  ac.bk_id,
-  ac.ac_type,
-  actype.ac_type_desc,
-  ac.dtl_ac_type,
-  dtltype.dtl_ac_type_desc,
-  dtltype.ac_type_grp_dcde,
-  ac.data_src_id,
-  dtltype.prod_info_url_desc,
-  alias.upd_ac_desc,
-  alias.last_upd_ts,
-  cmpnt.cmpnt_dede,
-  cmpnt.sort_nbr
-FROM
-  npf_account ac
-JOIN npf_ac_type actype
-  ON ac.ac_type = actype.ac_type
-JOIN npf_dtl_ac_type dtltype
-  ON ac.dtl_ac_type = dtltype.dtl_ac_type
-LEFT JOIN npf_cust_ac alias
-  ON alias.ac_sk = ac.ac_sk
-LEFT JOIN npf_consl_cmpnt cmpnt
-  ON cmpnt.ac_sk = ac.ac_sk
-WHERE
-  ac.ac_stat_dcde = 'ACT'
-  AND alias.cust_sk = p_cust_sk
-  AND EXISTS (
-    SELECT 1
-    FROM cust_user_xref xref
-    WHERE xref.cust_sk = alias.cust_sk
-      AND xref.user_sk = p_user_sk
-  );
+WITH 
+account_type AS (
+    SELECT 
+        dtlAcTyp.ac_type_grp_dode,
+        dtlAcTyp.dtl_ac_type,
+        ac.cm_data_src_id,
+        ac.cm_ac_id,
+        ac.ac_sk,
+        (SELECT COUNT(cmpnt_ac_sk) FROM npf_decoder_xref WHERE decoder_ac_sk = ac.ac_sk) AS is_decoder
+    FROM 
+        npf_account ac
+        JOIN npf_dtl_ac_type dtlAcTyp ON ac.dtl_ac_type = dtlAcTyp.dtl_ac_type
+    WHERE 
+        ac.ac_sk = p_ac_sk
+),
+
+
+decoder_info AS (
+    SELECT 
+        cmpnt_ac_sk,
+        decoder_ac_id
+    FROM 
+        npf_decoder_xref
+    WHERE 
+        decoder_ac_sk = p_ac_sk
+        AND cust_sk = p_cust_sk
+    ORDER BY 
+        cmpnt_data_src_id ASC
+    FETCH FIRST 1 ROW ONLY
+),
+
+valuation_data AS (
+    SELECT 
+        MAX(valn_as_of_date) AS max_valn_date,
+        TRUNC(NVL(MAX(valn_as_of_date), v_npf_data_load_date)) AS data_load_date
+    FROM 
+        NPF_AC_POSN_SUM
+    WHERE 
+        AC_SK = p_ac_sk
+        AND TRUNC(valn_as_of_date) >= TRUNC(v_npf_data_load_date)
+),
+
+monday_check AS (
+    SELECT 
+        CASE 
+            WHEN v_ac_data_src_id NOT IN (8) AND UPPER(TO_CHAR(v_data_load_date, 'DAY')) LIKE 'MONDAY%'
+                 AND v_data_load_comp < v_data_load_date THEN
+                (SELECT MAX(valn_as_of_date) FROM NPF_AC_POSN_SUM WHERE AC_SK = p_ac_sk AND TRUNC(valn_as_of_date) <= TRUNC(v_data_load_date))
+            ELSE v_data_load_date
+        END AS begin_date_inter_c
+    FROM 
+        dual
+),
+
+valn_mgr_data AS (
+    SELECT 
+        valn_freq_dode,
+        begin_valn_run_time,
+        end_valn_run_time,
+        max_valn_date,
+        max_valn_end_date
+    FROM 
+        TABLE(npf_common_pkg.npf_valn_mgr(
+            p_ac_sk,
+            v_begin_date_c,
+            'NA'
+        ))
+),
+
+account_details AS (
+    SELECT 
+        ac.ac_sk,
+        -- Data masked account ID
+        CASE 
+            WHEN di.cmpnt_ac_sk IS NOT NULL THEN di.decoder_ac_id  -- For decoder accounts
+            WHEN ac.data_src_id = 7 THEN ac.ac_id 
+            ELSE npf_data_mask_pkg.get_masked_acid_for_acsk(NULL, p_cust_sk, ac.ac_sk) 
+        END AS ac_id,
+        ac.bk_id, 
+        ac.ac_type, 
+        actype.ac_type_desc, 
+        ac.dtl_ac_type,
+        dtltype.dtl_ac_type_desc, 
+        dtltype.ac_type_grp_dode,
+        ac.data_src_id,
+        dtltype.prod_info_url_desc,
+        -- Get SSN from Private Passport/NBN view
+        npf_acc_prfl_pkg.getAccountSSN(ac.cm_data_src_id, ac.cm_ac_id) tx_id,
+        -- Data source description
+        CASE
+            WHEN ac.data_src_id IN (6,8,9) THEN COALESCE(ac.svc_prvdr_desc, src.ac_dtl_src_desc)
+            ELSE src.ac_dtl_src_desc
+        END data_src_desc,
+        -- Data masked account description
+        NVL(alias.upd_ac_desc, 
+            DECODE(ac.data_src_id, 7, ac_desc, npf_data_mask_pkg.get_masked_ac_name(NULL, p_cust_sk, ac.ac_sk, ac_desc))
+        ) AS ac_desc,
+        alias.ac_alias, 
+        ac.bse_curr_dode, 
+        npf_util_pkg.get_dode_desc('CURRIDLB', ac.bse_curr_dode) bse_curr,
+        ac.ac_stat_dode, 
+        ac.svc_prvdr_desc, 
+        ac.svc_prvdr_url_desc,
+        ac.liab_flag, 
+        npf_util_pkg.get_dode_desc('LIABFLAO', ac.liab_flag) liab_flag_dode,
+        ac.real_tm_upd_flag, 
+        ac.fisc_vmd, 
+        ac.lot_rlf_meth_dode,
+        ac.inv_obj_dode as inv_obj,
+        -- Investment object description
+        CASE
+            WHEN ac.data_src_id IN (7,6,9,12) THEN 
+                CASE 
+                    WHEN ac.data_src_id IN (7,6,12) THEN npf_util_pkg.get_dode_desc('FORSTYLE', ac.inv_obj_dode)
+                    ELSE npf_util_pkg.get_dode_desc('PCRSTYLE', ac.inv_obj_dode)
+                END
+            ELSE npf_util_pkg.get_dode_desc('INVOBJ', ac.inv_obj_dode)
+        END inv_obj_dode,
+        -- Account calculation methods
+        ac.ac_prem_calc_meth_dode, 
+        ac.ac_amort_calc_meth_dode,
+        ac.ac_acrt_calc_meth_dode, 
+        ac.ac_old_calc_meth_dode, 
+        ac.ac_close_date,
+        ac.ac_open_date, 
+        ac.npf_data_load_date, 
+        ac.ac_creat_user_sk,
+        ac.cm_ac_id, 
+        ac.cm_data_src_id, 
+        ac.alv_marg_ac_flag, 
+        ac.creat_by, 
+        ac.creat_tm,
+        ac.upd_by, 
+        ac.upd_tm, 
+        src.extrl_flg,
+        -- Account attributes (1-5)
+        npf_account_pkg.get_ac_attrib_dtls(ac.ac_sk, alias.cust_sk, 1) attrib_desc1,
+        npf_account_pkg.get_ac_attrib_dtls(ac.ac_sk, alias.cust_sk, 2) attrib_desc2,
+        npf_account_pkg.get_ac_attrib_dtls(ac.ac_sk, alias.cust_sk, 3) attrib_desc3,
+        npf_account_pkg.get_ac_attrib_dtls(ac.ac_sk, alias.cust_sk, 4) attrib_desc4,
+        npf_account_pkg.get_ac_attrib_dtls(ac.ac_sk, alias.cust_sk, 5) attrib_desc5,
+        ac.ac_memo_desc,
+        pi.indx_sk,
+        pi.indx_desc,
+        -- Aggregation details
+        acagr.lst_valn_date,
+        acagr.ast_acg_date,
+        acagr.ac_commt_amt,
+        acagr.ac_fund_amt,
+        acagr.aggr_ast_id,
+        -- Asset details
+        ast.iss_type,
+        ast.nan_aggr_ast_id,
+        ast.vintage_yr,
+        ast.fund_type,
+        npf_util_pkg.get_dode_desc('FUND_TYPE', ast.fund_type) fund_type_desc,
+        ast.prc_curr_dode, 
+        npf_util_pkg.get_dode_desc('CURRIDOAS', ast.prc_curr_dode) prc_curr,
+        -- Linked account details
+        lnkd_ac.lnkd_ac_sk,
+        lnkd_ac.lnkd_ac_id,
+        lnkd_ac.ac_desc as lnkd_ac_desc,
+        CASE
+            WHEN lnkd_ast.ast_short_desc IS NULL THEN lnkd_ast.ast_long_desc
+            ELSE lnkd_ast.ast_short_desc
+        END lnkd_ast_desc,
+        lnkd_ast.tnt_sec_id as lnkd_ast_id,
+        lnkd_ast.issuer_id,
+        -- Empty currency fields for EMEA
+        '' prc_curr_dode, 
+        '' prc_curr -- EMEA Change
+    FROM 
+        npf_account ac
+        JOIN npf_cust_ac_alias alias ON ac.ac_sk = alias.ac_sk AND alias.cust_sk = p_cust_sk
+        JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
+        JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+        JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
+        LEFT JOIN decoder_info di ON 1=1
+        LEFT JOIN npf_ac_aggregation acagr ON ac.ac_sk = acagr.ac_sk
+        LEFT JOIN npf_asset ast ON acagr.aggr_ast_id = ast.aggr_ast_id
+        LEFT JOIN npf_perf_indx_ac aep ON ac.ac_sk = aep.ac_sk
+        LEFT JOIN npf_perf_indx pi ON aep.indx_sk = pi.indx_sk
+        LEFT JOIN (
+            -- Complex linked account subquery with decoder handling
+            SELECT DISTINCT 
+                NVL(linked_ac_det.ac_desc, decoder_desc.ac_desc) AS ac_desc,
+                linked_ac_det.ac_id AS lnkd_ac_id,
+                NVL(linked_ac_det.decoder_ac_sk, linked_ac_det.lnkd_ac_sk) AS lnkd_ac_sk,
+                linked_ac_det.ac_sk
+            FROM 
+                npf_account a,
+                npf_ac_cust_user ac_cust,
+                (
+                    SELECT ndx.ac_desc,
+                        NVL(decode.decoder_ac_id, ac.ac_id) AS ac_id,
+                        ac.ac_stat_desc,
+                        print_ac.ac_sk,
+                        print_ac.instr_id,
+                        decode.decoder_ac_sk,
+                        print_ac.lnkd_ac_sk
+                    FROM 
+                        npf_account ac,
+                        npf_instr_print_ac print_ac,
+                        npf_decoder_xref decode,
+                        (
+                            SELECT ac_sk, ac_desc, cmpnt_data_src_id, decoder_ac_sk
+                            FROM (
+                                SELECT 
+                                    ac.ac_sk,
+                                    ac.ac_desc,
+                                    decode.cmpnt_data_src_id,
+                                    decode.decoder_ac_sk,
+                                    COUNT(DECODER_AC_SK) OVER (PARTITION BY DECODER_AC_SK) tot_dec_ac
+                                FROM 
+                                    npf_account ac,
+                                    npf_decoder_xref decode
+                                WHERE ac.ac_sk = decode.cmpnt_ac_sk(+)
+                            ) 
+                            WHERE (CASE
+                                WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 1 THEN 'Y'
+                                WHEN tot_dec_ac = 1 THEN 'Y'
+                                WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 2 THEN 'N'
+                                ELSE 'Y'
+                            END) = 'Y'
+                        ) ndx
+                    WHERE 
+                        ac.ac_sk = print_ac.lnkd_ac_sk
+                        AND print_ac.lnkd_ac_sk = decode.cmpnt_ac_sk(+)
+                        AND ndx.ac_sk(+) = ac.ac_sk
+                ) linked_ac_det,
+                (
+                    SELECT decoder_ac_id, ac_desc, cmpnt_data_src_id
+                    FROM (
+                        SELECT 
+                            deco.decoder_ac_id,
+                            acct.ac_desc,
+                            deco.cmpnt_data_src_id,
+                            COUNT(DECODER_AC_SK) OVER (PARTITION BY DECODER_AC_SK) tot_dec_ac
+                        FROM 
+                            npf_decoder_xref deco,
+                            npf_account acct
+                        WHERE deco.cmpnt_ac_sk = acct.ac_sk
+                    ) 
+                    WHERE (CASE
+                        WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 1 THEN 'Y'
+                        WHEN tot_dec_ac = 1 THEN 'Y'
+                        WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 2 THEN 'N'
+                        ELSE 'Y'
+                    END) = 'Y'
+                ) decoder_desc
+            WHERE
+                linked_ac_det.ac_id = decoder_desc.decoder_ac_id(+)
+                AND a.ac_sk = linked_ac_det.lnkd_ac_sk
+                AND ac_cust.ac_sk = a.ac_sk
+                AND ac_cust.cust_sk = p_cust_sk
+        ) lnkd_ac ON ac.ac_sk = lnkd_ac.ac_sk
+        LEFT JOIN (
+            SELECT a.instr_id, a.ac_sk, b.ast_short_desc, b.ast_long_desc, b.tnt_sec_id, b.issuer_id 
+            FROM npf_asset b, npf_mstr_print_ac a
+            WHERE a.instr_id = b.instr_id
+        ) lnkd_ast ON lnkd_ac.lnkd_ac_sk = lnkd_ast.ac_sk
+    WHERE 
+        ac.ac_sk = p_ac_sk
+)
+
+-- Final combined result
+SELECT 
+    -- Account profile details
+    at.ac_type_grp_dode AS p_ac_type_grp_dode,
+    
+    -- SSN (if account is not WAS)
+    CASE 
+        WHEN at.ac_type_grp_dode NOT IN ('FIR','MAG') THEN 
+            getAccountSSN(at.cm_data_src_id, at.cm_ac_id)
+        ELSE NULL
+    END AS p_i_tx,
+    
+    -- Disclaimer text
+    CASE
+        WHEN at.ac_type_grp_dode IN ('ACK','CHK','ICK','SAV') THEN
+            CASE 
+                WHEN at.dtl_ac_type IN ('SAV') THEN getAccountDsclmr(at.dtl_ac_type)
+                ELSE getAccountRLDsclmr(at.dtl_ac_type, p_ac_sk)
+            END
+        ELSE getAccountDsclmr(at.dtl_ac_type)
+    END AS p_dsclmr_desc,
+    
+    -- Display zero valuation flag
+    CASE 
+        WHEN vd.max_valn_date IS NULL THEN 1
+        ELSE 0
+    END AS p_display_zero_valn,
+    
+    -- Account balances based on account type group
+    CASE
+        WHEN at.is_decoder >= 1 THEN
+            (SELECT * FROM TABLE(getNonBankingBals(p_ac_sk, p_cust_sk, at.ac_type_grp_dode, NULL, p_display_zero_valn, NULL)))
+        WHEN at.ac_type_grp_dode IN ('ACK','CD','CHK','ICK','SAV') THEN
+            (SELECT * FROM TABLE(getBankingLoBals(p_ac_sk, vd.data_load_date, vd.max_valn_date)))
+        WHEN at.ac_type_grp_dode IN ('BRX','INA','ITR','MMD','RTR','SEC') THEN
+            (SELECT * FROM TABLE(getNonBankingBals(p_ac_sk, vd.data_load_date, vd.max_valn_date, vmd.valn_freq_dode, vmd.begin_valn_run_time)))
+        WHEN at.ac_type_grp_dode IN ('ECL','INL','MOL','CCL','CCM') THEN
+            (SELECT * FROM TABLE(getBankingLoamBals(p_ac_sk, vd.data_load_date, vd.max_valn_date)))
+        WHEN at.ac_type_grp_dode = 'MPU' THEN
+            (SELECT * FROM TABLE(getMutualFundBals(p_ac_sk, vd.data_load_date, vd.max_valn_date, vmd.valn_freq_dode, vmd.begin_valn_run_time)))
+        WHEN at.ac_type_grp_dode = 'MAG' THEN
+            (SELECT * FROM TABLE(getMutualAggregateBals(p_ac_sk, vd.data_load_date, vd.max_valn_date, vmd.valn_freq_dode, vmd.begin_valn_run_time)))
+        WHEN at.ac_type_grp_dode = 'PTB' THEN
+            (SELECT * FROM TABLE(getPTRAccountBals(p_ac_sk, vd.data_load_date, vd.max_valn_date, vmd.valn_freq_dode, vmd.begin_valn_run_time)))
+        WHEN at.ac_type_grp_dode IN ('YIN','YIM','YRM') THEN
+            (SELECT * FROM TABLE(getYaleAggregateBals(p_ac_sk, vd.data_load_date, vd.max_valn_date, vmd.valn_freq_dode, vmd.begin_valn_run_time)))
+        ELSE
+            (SELECT * FROM TABLE(getNonBankingBals(p_ac_sk, vd.data_load_date, vd.max_valn_date, vmd.valn_freq_dode, vmd.begin_valn_run_time)))
+    END AS account_balances,
+    
+    -- All account details from get_account_dtls
+    ad.*,
+    
+    -- Valuation and data load info
+    vd.data_load_date,
+    vd.max_valn_date,
+    vmd.valn_freq_dode,
+    vmd.begin_valn_run_time,
+    vmd.end_valn_run_time
+FROM 
+    account_type at
+    LEFT JOIN decoder_info di ON at.is_decoder >= 1
+    JOIN account_details ad ON at.ac_sk = ad.ac_sk
+    JOIN valuation_data vd ON 1=1
+    JOIN monday_check mc ON 1=1
+    JOIN valn_mgr_data vmd ON 1=1;
