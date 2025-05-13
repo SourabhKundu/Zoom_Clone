@@ -1,140 +1,69 @@
-
-WITH account_type_info AS (
+WITH base_data AS (
     SELECT
         ac.ac_sk,
-        ac.dtl_ac_type,
-        ac.ac_desc,
+        CASE 
+            WHEN 'WLT' = 'WLT' OR ac.data_src_id = 7 THEN ac.ac_id
+            ELSE NPF_DATA_MASK_PKG.GET_MASKED_ACID_FOR_ACSK('ABC123', 'CUST123', ac.ac_sk)
+        END AS ac_id,
+        alias.ac_alias,
+        NVL(
+            alias.upd_ac_desc,
+            CASE 
+                WHEN 'WLT' = 'WLT' OR ac.data_src_id = 7 THEN ac.ac_desc
+                ELSE NPF_DATA_MASK_PKG.GET_MASKED_AC_NAME('ABC123', 'CUST123', ac.ac_sk, ac.ac_desc)
+            END
+        ) AS ac_desc,
+        cmpnt.cmpnt_dcde,
+        cmpnt.sort_nbr,
         ac.data_src_id,
-        CASE 
-            WHEN ac.ac_stat_dcde IN ('OPEN', 'REOPEN', 'OPENDEP', 'NOT PAID', 'DEMAND', 'CLOSETAX') THEN 'Y'
-            ELSE 'N'
-        END AS ac_active,
-        typ.ac_type_grp_dcde
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
-    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type typ 
-        ON ac.dtl_ac_type = typ.dtl_ac_type
+        ac.bse_curr_dcde
+    FROM npf_account ac
+    JOIN npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk
+    JOIN npf_consl consl ON consl.consl_sk IN ('12345')
+    JOIN npf_consl_cmpnt cmpnt ON cmpnt.consl_sk = consl.consl_sk
+    JOIN npf_ac_cust_user xref ON xref.ac_sk = ac.ac_sk
+    WHERE 
+        cmpnt.cmpnt_dcde = 'ACCOUNT'
+        AND cmpnt.cmpnt_sk_val = ac.ac_sk
+        AND cmpnt.consl_cmpnt_stat_dcde = 'ACTIVE'
+        AND alias.cust_sk = consl.cust_sk
+        AND xref.user_sk = 'ABC123'
+        AND xref.cust_sk = 'CUST123'
+        AND NOT EXISTS (
+            SELECT 1
+            FROM npf_account ac2
+            JOIN npf_consl_cmpnt cmpnt2 ON cmpnt2.consl_sk = ac2.consl_sk
+            JOIN npf_consl consl2 ON cmpnt2.consl_sk = consl2.consl_sk
+            WHERE consl2.consl_sk IN ('12345')
+              AND cmpnt2.cmpnt_dcde = 'ACCOUNT'
+              AND cmpnt2.cmpnt_sk_val = ac2.ac_sk
+              AND cmpnt2.consl_cmpnt_stat_dcde = 'ACTIVE'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM npf_ac_cust_user acu
+                  WHERE acu.ac_sk = ac2.ac_sk
+                    AND acu.cust_sk = consl2.cust_sk
+                    AND acu.user_sk = 'ABC123'
+              )
+        )
 ),
-
-transaction_summary AS (
+base_consols AS (
     SELECT
-        nt.ac_sk,
-        ROUND(SUM(CASE WHEN nt.net_cash_bse_amt > 0 THEN nt.net_cash_bse_amt ELSE 0 END), 2) AS credit_amt,
-        ROUND(SUM(CASE WHEN nt.net_cash_bse_amt < 0 THEN nt.net_cash_bse_amt ELSE 0 END), 2) AS debit_amt
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_transaction nt
-    WHERE nt.net_cash_bse_amt != 0
-      AND nt.rpt_incl_date_time BETWEEN TO_DATE(:v_mon_st_date) AND TO_DATE(:v_prev_bus_day)
-    GROUP BY nt.ac_sk
-),
-
-valuation_summary AS (
-    SELECT
-        np.ac_sk,
-        np.valn_as_of_date,
-        SUM(COALESCE(np.mv_bse_amt, 0)) AS tot_mv_bse_amt
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_position np
-    WHERE np.ac_sk = :v_ac_sk
-      AND np.valn_as_of_date IN (:v_beg_valn_as_of_date, :v_lst_valn_as_of_date)
-    GROUP BY np.ac_sk, np.valn_as_of_date
-),
-
-closing_balances AS (
-    SELECT
-        trg.ac_sk,
-        trg.valn_as_of_date,
-        trg.valn_run_time,
-        trg.ac_mv_bse_amt AS close_ldgr_bal_amt
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum trg
-    JOIN (
-        SELECT ac_sk, valn_as_of_date, valn_run_time
-        FROM (
-            SELECT ac_sk, valn_as_of_date, valn_run_time,
-                   ROW_NUMBER() OVER (PARTITION BY ac_sk ORDER BY valn_freq_dcde DESC, valn_appr_flag DESC, valn_run_time DESC) AS rn
-            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum
-            WHERE ac_sk = :v_ac_sk
-              AND valn_as_of_date <= :v_lst_valn_as_of_date
-        ) WHERE rn = 1
-    ) src ON trg.ac_sk = src.ac_sk 
-         AND trg.valn_as_of_date = src.valn_as_of_date 
-         AND trg.valn_run_time = src.valn_run_time
-),
-
-final_output AS (
-    SELECT
-        vs1.ac_sk,
-        vs1.tot_mv_bse_amt                         AS po_lst_tot_mv_amt_a,
-        vs2.tot_mv_bse_amt                         AS po_beg_tot_mv_amt_a,
-        ts.credit_amt                              AS po_credit_amt_a,
-        ts.debit_amt                               AS po_debit_amt_a,
-        cb.close_ldgr_bal_amt                      AS po_close_ldgr_bal_amt_a,
-        (vs2.tot_mv_bse_amt + ts.credit_amt + ts.debit_amt) AS po_curr_bal_a,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_mmd_c, :pg_det_type_ick_c)
-            THEN dep.apy_rt_amt * :pg_percent_val_n
-            ELSE NULL
-        END AS po_curr_apy_a,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_chk_c, :pg_det_type_ack_c)
-                 AND :v_dtl_ac_type != :pg_det_type_sav_c
-                 AND dep.pra_cr_lim_amt > 0
-            THEN ROUND(dep.pra_cr_lim_amt, :pg_std_rounding)
-            ELSE NULL
-        END AS po_max_nl_amt_a,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_chk_c, :pg_det_type_ack_c)
-                 AND dep.pra_used_amt > 0
-            THEN ROUND(dep.pra_used_amt, :pg_std_rounding)
-            ELSE NULL
-        END AS po_nl_used_amt_a,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_chk_c, :pg_det_type_ack_c)
-                 AND dep.pra_cr_lim_amt > 0
-            THEN ROUND(dep.pra_avail_amt, :pg_std_rounding)
-            ELSE NULL
-        END AS po_avail_cr_amt_a,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_cd_c, :pg_det_type_mmd_c, :pg_det_type_ick_c)
-            THEN ROUND(dep.cur_rt_amt * :pg_percent_val_n)
-            ELSE NULL
-        END AS po_curr_rt_amt_a,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_cd_c, :pg_det_type_mmd_c, :pg_det_type_ick_c)
-            THEN ROUND(dep.int_pd_ytd_amt, :pg_std_rounding)
-            ELSE NULL
-        END AS po_int_pd_ytd_amt_n,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_cd_c, :pg_det_type_mmd_c, :pg_det_type_ick_c)
-            THEN ROUND(dep.txw_ytd_amt, :pg_std_rounding)
-            ELSE NULL
-        END AS po_txw_ytd_amt_n,
-
-        CASE 
-            WHEN :v_det_ac_type_a IN (:pg_det_type_mmd_c, :pg_det_type_ick_c)
-            THEN dep.apy_rt_lst_per_amt * :pg_percent_val_n
-            ELSE NULL
-        END AS po_close_prd_apy_a,
-
-        DECODE(:v_det_ac_type_a, :pg_det_type_cd_c, dep.term_cd_qty_nbr || ' ' , NULL) AS po_cd_term_c,
-        DECODE(:v_det_ac_type_a, :pg_det_type_cd_c, dep.matur_cde_date, NULL) AS po_mature_dt_date,
-        DECODE(:v_det_ac_type_a, :pg_det_type_cd_c, ROUND(dep.lst_int_pmt_amt, :pg_std_rounding), NULL) AS po_lst_int_pmt_amt_a
-
-    FROM valuation_summary vs1
-    LEFT JOIN valuation_summary vs2 
-        ON vs2.ac_sk = vs1.ac_sk AND vs2.valn_as_of_date = :v_beg_valn_as_of_date
-    LEFT JOIN transaction_summary ts 
-        ON ts.ac_sk = vs1.ac_sk
-    LEFT JOIN closing_balances cb 
-        ON cb.ac_sk = vs1.ac_sk
-    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_deposit dep 
-        ON dep.ac_sk = vs1.ac_sk
-    WHERE vs1.ac_sk = :v_ac_sk 
-      AND vs1.valn_as_of_date = :v_lst_valn_as_of_date
+        sub.consl_sk,
+        NULL AS ac_id,
+        NULL AS ac_alias,
+        sub.consl_desc AS ac_desc,
+        cmpnt.cmpnt_dcde,
+        cmpnt.sort_nbr,
+        NULL AS data_src_id,
+        NULL AS bse_curr_dcde
+    FROM npf_consl consl
+    JOIN npf_consl_cmpnt cmpnt ON cmpnt.consl_sk = consl.consl_sk
+    JOIN npf_consl sub ON cmpnt.cmpnt_sk_val = sub.consl_sk
+    WHERE consl.consl_sk = '12345'
+      AND cmpnt.cmpnt_dcde = 'CONSL'
+      AND cmpnt.consl_cmpnt_stat_dcde = 'ACTIVE'
 )
-
-SELECT * FROM final_output;
+SELECT * FROM base_data
+UNION ALL
+SELECT * FROM base_consols;
