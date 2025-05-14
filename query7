@@ -1,0 +1,56 @@
+WITH user_info AS (
+    SELECT user_sk, dflt_rptg_type
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user
+    WHERE user_sk = 8901
+),
+user_count_info AS (
+    SELECT COUNT(*) AS user_cnt
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user usr
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_cust_user acu
+        ON usr.user_sk = acu.user_sk
+    WHERE acu.cust_sk = 1234
+      AND acu.ac_sk = ac.ac_sk
+      AND usr.dflt_rptg_type = 'WLT'
+)
+
+SELECT
+    ac.ac_sk,
+    CASE 
+        WHEN ac.data_src_id = 7 THEN
+            CASE 
+                WHEN 1 = 1 THEN 
+                    SUBSTR(LPAD(ac.ac_id, 20, '0'), LENGTH(LPAD(ac.ac_id, 20, '0')) - 3, 4)
+                ELSE
+                    CASE 
+                        WHEN EXISTS (SELECT 1 FROM user_info) THEN
+                            CASE 
+                                WHEN 'Y' = 'Y' AND LENGTH(ac.ac_id) > 4 
+                                  AND EXISTS (
+                                    SELECT 1 FROM user_info WHERE dflt_rptg_type = 'PCS'
+                                  )
+                                THEN
+                                    LPAD(
+                                        SUBSTR(ac.ac_id, POSITION('(' IN ac.ac_id) - 4),
+                                        LENGTH(ac.ac_id),
+                                        'x'
+                                    )
+                                ELSE ac.ac_id
+                            END
+                        ELSE
+                            CASE 
+                                WHEN (SELECT user_cnt FROM user_count_info) > 0 THEN
+                                    CASE 
+                                        WHEN 'Y' = 'Y' AND LENGTH(ac.ac_id) > 4 AND 'PCS' = 'PCS' THEN
+                                            LPAD(
+                                                SUBSTR(ac.ac_id, POSITION('(' IN ac.ac_id) - 4),
+                                                LENGTH(ac.ac_id),
+                                                'x'
+                                            )
+                                        ELSE ac.ac_id
+                                    END
+                                ELSE ac.ac_id
+                            END
+                    END
+            END
+        ELSE ac.ac_id
+    END AS ac_id
