@@ -1,0 +1,338 @@
+
+SELECT 
+    ac.ac_sk,
+    CASE 
+        WHEN v_cmpnt_ac_sk IS NOT NULL THEN v_decoder_ac_id
+        WHEN ac.data_src_id = 7 THEN 
+            CASE 
+                WHEN :p_data_mask_user_flag = 1 THEN 
+                    SUBSTR(LPAD(ac.ac_id, 20, '0'), LENGTH(LPAD(ac.ac_id, 20, '0')) - 3, 4)
+                ELSE
+                    CASE 
+                        WHEN EXISTS (
+                            SELECT 1 FROM npf_user WHERE user_sk = p_user_sk
+                        ) THEN
+                            CASE 
+                                WHEN :v_mask_ac = 'Y'
+                                  AND LENGTH(ac.ac_id) > 4
+                                  AND (
+                                    SELECT DFLT_RPTG_TYPE 
+                                    FROM npf_user 
+                                    WHERE user_sk = p_user_sk
+                                  ) = 'PCS'
+                                THEN 
+                                    LPAD(
+                                        SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4),
+                                        LENGTH(ac.ac_id),
+                                        'x'
+                                    )
+                                ELSE ac.ac_id
+                            END
+                        ELSE 
+                            CASE 
+                                WHEN (
+                                    SELECT COUNT(*) 
+                                    FROM npf_user usr 
+                                    JOIN npf_ac_cust_user acu 
+                                      ON usr.user_sk = acu.user_sk 
+                                    WHERE acu.cust_sk = p_cust_sk 
+                                      AND acu.ac_sk = ac.ac_sk 
+                                      AND usr.dflt_rptg_type = 'WLT'
+                                ) > 0
+                                THEN
+                                    CASE 
+                                        WHEN :v_mask_ac = 'Y'
+                                          AND LENGTH(ac.ac_id) > 4
+                                          AND 'PCS' = 'PCS'
+                                        THEN 
+                                            LPAD(
+                                                SUBSTR(ac.ac_id, INSTR(ac.ac_id, '(', 1, 1) - 4),
+                                                LENGTH(ac.ac_id),
+                                                'x'
+                                            )
+                                        ELSE ac.ac_id
+                                    END
+                                ELSE ac.ac_id
+                            END
+                    END
+            END
+        ELSE ac.ac_id
+    END AS ac_id,
+
+    ac.bk_id, 
+    ac.ac_type, 
+    actype.ac_type_desc, 
+    ac.dtl_ac_type,
+    dtltype.dtl_ac_type_desc, 
+    dtltype.ac_type_grp_dode,
+    ac.data_src_id,
+    dtltype.prod_info_url_desc,
+    (
+  SELECT 
+    CASE 
+      WHEN SUBSTR(tx.i_tx, 1, 1) = '+' THEN REPLACE(tx.i_tx, '+', '')
+      WHEN SUBSTR(tx.i_tx, 1, 1) = '-' THEN REPLACE(tx.i_tx, '-', '')
+      ELSE tx.i_tx
+    END
+  FROM (
+    SELECT 
+      ac.C_AC_STAT,
+      ac.SOURCE_SYSTEM_TYPE,
+      ac.PRODUCT_LINE,
+      ac.ACCOUNT_LEGAL_IDENTIFIER AS i_tx,
+      sys_map.NRN_SRC_SYS,
+      ac.CONTRACT_ID AS i_nrn_ac
+    FROM npf_mds_account_load ac
+    INNER JOIN npfdbo.npf_mds_load_act_part k
+      ON ac.n_mds_db = k.active_partition
+    INNER JOIN npf_mds_nrn_acc_src_sys_map sys_map
+      ON ac.SOURCE_SYSTEM_TYPE = sys_map.sys_map
+      AND (
+        sys_map.mds_prod_line = ac.product_line
+        OR (sys_map.mds_prod_line IS NULL AND ac.product_line IS NULL)
+      )
+    WHERE ac.account_status_type_value <> 'Purged'
+  ) tx
+  WHERE tx.i_nrn_ac = ac.cm_ac_id
+    AND tx.NRN_SRC_SYS = ac.cm_data_src_id
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY tx.NRN_SRC_SYS, tx.i_nrn_ac ORDER BY tx.i_nrn_ac) = 1
+) tx_id,
+
+    NVL(
+        alias.upd_ac_desc,
+        CASE
+            WHEN ac.data_src_id = 7 THEN ac.ac_desc
+            ELSE 
+                CASE
+                    WHEN :p_data_mask_user_flag = 1 THEN
+                        CASE 
+                            WHEN ac.ac_stat_dode = 'CLOSED' AND ac.data_src_id NOT IN (6,7) THEN 
+                                'Closed - ' || dtltype.dtl_ac_type_desc
+                            ELSE 
+                                dtltype.dtl_ac_type_desc
+                        END
+                    ELSE ac.ac_desc
+                END
+        END
+    ) AS ac_desc,
+
+    alias.ac_alias, 
+    ac.bse_curr_dode, 
+    (
+      SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'CURRIDLB' AND dcde_code = TRIM(ac.bse_curr_dode)
+    ) AS bse_curr,
+    ac.ac_stat_dode, 
+    ac.svc_prvdr_desc, 
+    ac.svc_prvdr_url_desc,
+    ac.liab_flag, 
+    (
+      SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'LIABFLAO' AND dcde_code = TRIM(ac.liab_flag)
+    ) AS liab_flag_dode,
+    ac.real_tm_upd_flag, 
+    ac.fisc_vmd, 
+    ac.lot_rlf_meth_dode,
+    ac.inv_obj_dode as inv_obj,
+    CASE
+        WHEN ac.data_src_id IN (7,6,9,12) THEN 
+            CASE 
+                WHEN ac.data_src_id IN (7,6,12) THEN (
+                    SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'FORSTYLE' AND dcde_code = TRIM(ac.inv_obj_dode)
+                )
+                ELSE (
+                    SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'PCRSTYLE' AND dcde_code = TRIM(ac.inv_obj_dode)
+                )
+            END
+        ELSE (
+            SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'INVOBJ' AND dcde_code = TRIM(ac.inv_obj_dode)
+        )
+    END AS inv_obj_dode,
+
+    ac.ac_prem_calc_meth_dode, 
+    ac.ac_amort_calc_meth_dode,
+    ac.ac_acrt_calc_meth_dode, 
+    ac.ac_old_calc_meth_dode, 
+    ac.ac_close_date,
+    ac.ac_open_date, 
+    ac.npf_data_load_date, 
+    ac.ac_creat_user_sk,
+    ac.cm_ac_id, 
+    ac.cm_data_src_id, 
+    ac.alv_marg_ac_flag, 
+    ac.creat_by, 
+    ac.creat_tm,
+    ac.upd_by, 
+    ac.upd_tm, 
+    src.extrl_flg,
+
+    
+(
+  SELECT b.attrib_id || '|' || b.attrib_desc
+  FROM npf_ac_attrib a, npf_attribute b
+  WHERE a.attrib_id = b.attrib_id
+    AND a.ac_sk = ac.ac_sk
+    AND b.cust_sk = alias.cust_sk
+    AND b.attrib_hdr_seq = 1
+)
+ attrib_desc1,
+    
+(
+  SELECT b.attrib_id || '|' || b.attrib_desc
+  FROM npf_ac_attrib a, npf_attribute b
+  WHERE a.attrib_id = b.attrib_id
+    AND a.ac_sk = ac.ac_sk
+    AND b.cust_sk = alias.cust_sk
+    AND b.attrib_hdr_seq = 2
+)
+ attrib_desc2,
+    
+(
+  SELECT b.attrib_id || '|' || b.attrib_desc
+  FROM npf_ac_attrib a, npf_attribute b
+  WHERE a.attrib_id = b.attrib_id
+    AND a.ac_sk = ac.ac_sk
+    AND b.cust_sk = alias.cust_sk
+    AND b.attrib_hdr_seq = 3
+)
+ attrib_desc3,
+    
+(
+  SELECT b.attrib_id || '|' || b.attrib_desc
+  FROM npf_ac_attrib a, npf_attribute b
+  WHERE a.attrib_id = b.attrib_id
+    AND a.ac_sk = ac.ac_sk
+    AND b.cust_sk = alias.cust_sk
+    AND b.attrib_hdr_seq = 4
+)
+ attrib_desc4,
+    
+(
+  SELECT b.attrib_id || '|' || b.attrib_desc
+  FROM npf_ac_attrib a, npf_attribute b
+  WHERE a.attrib_id = b.attrib_id
+    AND a.ac_sk = ac.ac_sk
+    AND b.cust_sk = alias.cust_sk
+    AND b.attrib_hdr_seq = 5
+)
+ attrib_desc5,
+
+    ac.ac_memo_desc,
+    pi.indx_sk,
+    pi.indx_desc,
+    acagr.lst_valn_date,
+    acagr.ast_acg_date,
+    acagr.ac_commt_amt,
+    acagr.ac_fund_amt,
+    acagr.aggr_ast_id,
+
+    ast.iss_type,
+    ast.nan_aggr_ast_id,
+    ast.vintage_yr,
+    ast.fund_type,
+    (
+      SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'FUND_TYPE' AND dcde_code = TRIM(ast.fund_type)
+    ) AS fund_type_desc,
+    ast.prc_curr_dode, 
+    (
+      SELECT dcde_desc FROM npf_decode WHERE dcde_type = 'CURRIDOAS' AND dcde_code = TRIM(ast.prc_curr_dode)
+    ) AS prc_curr
+    lnkd_ac.lnkd_ac_sk,
+    lnkd_ac.lnkd_ac_id,
+    lnkd_ac.ac_desc as lnkd_ac_desc,
+    CASE
+        WHEN lnkd_ast.ast_short_desc IS NULL THEN lnkd_ast.ast_long_desc
+        ELSE lnkd_ast.ast_short_desc
+    END lnkd_ast_desc,
+    lnkd_ast.tnt_sec_id as lnkd_ast_id,
+    lnkd_ast.issuer_id,
+    '' prc_curr_dode, 
+    '' prc_curr
+FROM 
+    npf_account ac
+    JOIN npf_cust_ac_alias alias ON ac.ac_sk = alias.ac_sk AND alias.cust_sk = p_cust_sk
+    JOIN npf_ac_type actype ON actype.ac_type = ac.ac_type
+    JOIN npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+    JOIN npf_data_src src ON src.data_src_id = ac.data_src_id
+    LEFT JOIN npf_ac_aggregation acagr ON ac.ac_sk = acagr.ac_sk
+    LEFT JOIN npf_asset ast ON acagr.aggr_ast_id = ast.aggr_ast_id
+    LEFT JOIN npf_perf_indx_ac aep ON ac.ac_sk = aep.ac_sk
+    LEFT JOIN npf_perf_indx pi ON aep.indx_sk = pi.indx_sk
+    LEFT JOIN (
+        SELECT DISTINCT 
+            NVL(linked_ac_det.ac_desc, decoder_desc.ac_desc) AS ac_desc,
+            linked_ac_det.ac_id AS lnkd_ac_id,
+            NVL(linked_ac_det.decoder_ac_sk, linked_ac_det.lnkd_ac_sk) AS lnkd_ac_sk,
+            linked_ac_det.ac_sk
+        FROM 
+            npf_account a,
+            npf_ac_cust_user ac_cust,
+            (
+                SELECT ndx.ac_desc,
+                    NVL(decode.decoder_ac_id, ac.ac_id) AS ac_id,
+                    ac.ac_stat_desc,
+                    print_ac.ac_sk,
+                    print_ac.instr_id,
+                    decode.decoder_ac_sk,
+                    print_ac.lnkd_ac_sk
+                FROM 
+                    npf_account ac,
+                    npf_instr_print_ac print_ac,
+                    npf_decoder_xref decode,
+                    (
+                        SELECT ac_sk, ac_desc, cmpnt_data_src_id, decoder_ac_sk
+                        FROM (
+                            SELECT 
+                                ac.ac_sk,
+                                ac.ac_desc,
+                                decode.cmpnt_data_src_id,
+                                decode.decoder_ac_sk,
+                                COUNT(DECODER_AC_SK) OVER (PARTITION BY DECODER_AC_SK) tot_dec_ac
+                            FROM 
+                                npf_account ac,
+                                npf_decoder_xref decode
+                            WHERE ac.ac_sk = decode.cmpnt_ac_sk(+)
+                        ) 
+                        WHERE (CASE
+                            WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 1 THEN 'Y'
+                            WHEN tot_dec_ac = 1 THEN 'Y'
+                            WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 2 THEN 'N'
+                            ELSE 'Y'
+                        END) = 'Y'
+                    ) ndx
+                WHERE 
+                    ac.ac_sk = print_ac.lnkd_ac_sk
+                    AND print_ac.lnkd_ac_sk = decode.cmpnt_ac_sk(+)
+                    AND ndx.ac_sk(+) = ac.ac_sk
+            ) linked_ac_det,
+            (
+                SELECT decoder_ac_id, ac_desc, cmpnt_data_src_id
+                FROM (
+                    SELECT 
+                        deco.decoder_ac_id,
+                        acct.ac_desc,
+                        deco.cmpnt_data_src_id,
+                        COUNT(DECODER_AC_SK) OVER (PARTITION BY DECODER_AC_SK) tot_dec_ac
+                    FROM 
+                        npf_decoder_xref deco,
+                        npf_account acct
+                    WHERE deco.cmpnt_ac_sk = acct.ac_sk
+                ) 
+                WHERE (CASE
+                    WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 1 THEN 'Y'
+                    WHEN tot_dec_ac = 1 THEN 'Y'
+                    WHEN tot_dec_ac = 2 AND cmpnt_data_src_id = 2 THEN 'N'
+                    ELSE 'Y'
+                END) = 'Y'
+            ) decoder_desc
+        WHERE
+            linked_ac_det.ac_id = decoder_desc.decoder_ac_id(+)
+            AND a.ac_sk = linked_ac_det.lnkd_ac_sk
+            AND ac_cust.ac_sk = a.ac_sk
+            AND ac_cust.cust_sk = p_cust_sk
+    ) lnkd_ac ON ac.ac_sk = lnkd_ac.ac_sk
+    LEFT JOIN (
+        SELECT a.instr_id, a.ac_sk, b.ast_short_desc, b.ast_long_desc, b.tnt_sec_id, b.issuer_id 
+        FROM npf_asset b, npf_mstr_print_ac a
+        WHERE a.instr_id = b.instr_id
+    ) lnkd_ast ON lnkd_ac.lnkd_ac_sk = lnkd_ast.ac_sk
+WHERE 
+    ac.ac_sk = p_ac_sk;
