@@ -1,4 +1,3 @@
-
 SELECT 
     ac.ac_sk,
     CASE 
