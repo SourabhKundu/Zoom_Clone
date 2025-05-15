@@ -165,49 +165,48 @@ SELECT
   dtltype.prod_info_url_desc,
 
   (
-    SELECT
-      CASE
-        WHEN ac.cm_data_src_id IN (
-          SELECT DISTINCT cm_data_src_id
-            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
-           WHERE data_src_id IN (5,10)
-             AND cm_data_src_id IS NOT NULL
-        )
-        THEN SUBSTR(
-               CASE
-                 WHEN LEFT(inner.i_tx,1) IN ('-','+')
-                   THEN SUBSTR(inner.i_tx,2)
-                 ELSE inner.i_tx
-               END,
-               3
-             )
-        ELSE
+  SELECT
+    CASE
+      WHEN ac.cm_data_src_id IN (
+        SELECT DISTINCT cm_data_src_id
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
+         WHERE data_src_id       IN (5,10)
+           AND cm_data_src_id IS NOT NULL
+      )
+      THEN
+        SUBSTR(
           CASE
-            WHEN LEFT(inner.i_tx,1) IN ('-','+')
-              THEN SUBSTR(inner.i_tx,2)
-            ELSE inner.i_tx
-          END
-      END
-    FROM (
-      SELECT
-        sys_map.nrn_src_sys             AS i_src_sys,
-        ac_mds.CONTRACT_ID              AS i_nrn_ac,
-        ac_mds.ACCOUNT_LEGAL_IDENTIFIER AS i_tx
-      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mds_account_load ac_mds
-      INNER JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mds_load_acct_part k
-        ON ac_mds.n_mds_db = k.active_partition
-      INNER JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mds_nrn_acc_src_sys_map sys_map
-        ON ac_mds.source_system_type = sys_map.mds_src_sys
-       AND (
-             sys_map.mds_prod_line = ac_mds.product_line
-             OR (sys_map.mds_prod_line IS NULL AND ac_mds.product_line IS NULL)
-           )
-      WHERE ac_mds.account_status_type_value <> 'Purged'
-    ) inner
-    WHERE inner.i_src_sys = ac.cm_data_src_id
-      AND inner.i_nrn_ac  = ac.cm_ac_id
-    LIMIT 1
-  ) AS tx_id,
+            WHEN LEFT(sub.i_tx,1) IN ('-','+') THEN SUBSTR(sub.i_tx,2)
+            ELSE sub.i_tx
+          END,
+          3
+        )
+      ELSE
+        CASE
+          WHEN LEFT(sub.i_tx,1) IN ('-','+') THEN SUBSTR(sub.i_tx,2)
+          ELSE sub.i_tx
+        END
+    END
+  FROM (
+    SELECT
+      sys_map.nrn_src_sys                AS i_src_sys,
+      ac_mds.CONTRACT_ID                 AS i_nrn_ac,
+      ac_mds.ACCOUNT_LEGAL_IDENTIFIER    AS i_tx
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mds_account_load    ac_mds
+    INNER JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mds_load_acct_part k
+      ON ac_mds.n_mds_db = k.active_partition
+    INNER JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mds_nrn_acc_src_sys_map sys_map
+      ON ac_mds.source_system_type = sys_map.mds_src_sys
+     AND (
+           sys_map.mds_prod_line = ac_mds.product_line
+        OR (sys_map.mds_prod_line IS NULL AND ac_mds.product_line IS NULL)
+     )
+    WHERE ac_mds.account_status_type_value <> 'Purged'
+  ) AS sub
+  WHERE sub.i_src_sys = ac.cm_data_src_id
+    AND sub.i_nrn_ac  = ac.cm_ac_id
+  LIMIT 1
+) AS tx_id,
 
   CASE WHEN dtltype.ac_type_grp_dcde IN ('MAG','PTR') AND ac.dtl_ac_type <> 'POR'
        THEN ast.iss_type END AS iss_type,
