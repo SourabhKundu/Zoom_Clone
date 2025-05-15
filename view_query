@@ -1,0 +1,62 @@
+SELECT 
+    sysmar.nrn_src_sys AS I_SRC_SYS,
+    ac.contract_id,
+    act.ac_num AS I_AC_NUM,
+    ac.mdm_account_number,
+    TO_NUMBER(ac.bank_number) AS I_BK_NUM,
+    SUBSTR(ac.branch_number, 1, 7) AS I_BR_NUM,
+    SUBSTR(
+        CASE 
+            WHEN ac.source_system_type = 100001 AND ac.product_line = 'CBM'
+            THEN 'BANK CARD'
+            ELSE NVL(ac.account_short_name, ac.account_name)
+        END, 1, 40
+    ) AS N_AC,
+    SUBSTR(ac.account_name, 1, 80) AS N_AC_LGL_TITLE,
+    SUBSTR(ac.account_short_name, 1, 20) AS N_AC_SH,
+    ac.c_ac_type,
+    TRUNC(ac.account_open_date) AS D_AC_OPEN,
+    ac.d_ac_close AS D_AC_CLOSE,
+    ac.c_ac_stat,
+    ac.statement_date AS D_STMT,
+    ac.account_legal_identifier AS I_T,
+    SUBSTR(ac.last_update_user, 1, 12) AS N_SYB_DB_USER,
+    ac.last_update_date AS S_ROW_UPD,
+    CASE 
+        WHEN ac.source_system_type = 100001 AND ac.product_line = 'LN' 
+        THEN 1 
+        ELSE 0 
+    END AS F_IS_LOAN,
+    CASE 
+        WHEN TRIM(SUBSTR(act.ac_num, 1, 3)) = 'PRA' 
+        THEN 1 
+        ELSE 0 
+    END AS F_IS_PRA,
+    CASE 
+        WHEN TRIM(SUBSTR(act.ac_num, 1, 1)) = 'C' 
+        THEN 1 
+        ELSE 0 
+    END AS F_IS_COMMT,
+    CASE 
+        WHEN ac.c_ac_stat = 'CLOSED' 
+        THEN 1 
+        ELSE 0 
+    END AS F_AC_CLOSE,
+    -- Optional placeholder if needed:
+    NULL AS F_OFX_AC_CLOSE,
+    TRIM(ac.revocable_flag) AS revocable_flag
+
+FROM 
+    npf_mds_account_load ac
+INNER JOIN 
+    npfdbo.npf_mds_load_act_part k
+    ON ac.n_mds_db = k.active_partition
+INNER JOIN 
+    prf_mds_nrn_acc_sre_sys sysmar
+    ON ac.source_system_type = sysmar.mds_sre_sus
+    AND (
+        sysmar.mds_prod_line = ac.product_line OR 
+        (sysmar.mds_prod_line IS NULL AND ac.product_line IS NULL)
+    )
+WHERE 
+    ac.account_status_type_value <> 'Purged';
