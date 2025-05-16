@@ -1,0 +1,10 @@
+SELECT
+  e.cde_key,
+  e.cde_tab,
+  e.i_svc,
+  p.intl_prop_val
+FROM ecp_cde_tab AS e
+JOIN ecp_intl_prop AS p
+  ON e.intl_prop_cde = p.intl_prop_cde
+WHERE
+  (:p_cde_key IS NULL    OR e.cde_key = :p_cde_key);
