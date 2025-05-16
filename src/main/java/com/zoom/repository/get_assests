@@ -1,0 +1,131 @@
+WITH
+  params AS (
+    SELECT
+      :p_ac_sk                             AS ac_sk,
+      COALESCE(:p_valn_as_of_date,
+        (SELECT data_load_date FROM npf_data_load_date)
+      )                                     AS valn_as_of_date,
+      CASE WHEN :p_user_sk = 1 THEN 'PCS'
+           ELSE (
+             SELECT dflt_rptg_type
+               FROM npf_user
+              WHERE user_sk = :p_user_sk
+           )
+      END                                   AS rptg_type
+  ),
+
+  asset_base AS (
+    SELECT
+      ac.ac_sk,
+      ast.cntry_risk_dcde,
+      ast.prim_trd_exch_dcde,
+      ast.ast_short_desc,
+      ast.instr_id,
+      ast.man_aggr_ast_id,
+      ast.isin_id,
+      ast.cusip_id,
+      ast.sedol_id,
+      ast.tkr_sym_id,
+      ast.iss_type           AS iss_type,
+      val.valn_as_of_date,
+      val.start_date,
+      val.end_date,
+      cat.subcatg_desc,
+      ast.prc_curr_dcde,
+      val.mv_bse_amt,
+      val.shr_hld,
+      val.adj_bas_bse_amt,
+      cat.iss_type           AS iss_type_1,
+      val.mv_lcl_amt,
+      val.adj_bas_lcl_amt,
+      ast.loc_commt_amt,
+      ast.loc_fund_amt
+    FROM params p
+    JOIN npf_account      ac
+      ON ac.ac_sk = p.ac_sk
+    JOIN npf_aggr_ast_val val
+      ON val.ac_sk = ac.ac_sk
+     AND val.valn_as_of_date = (
+           SELECT MAX(valn_as_of_date)
+             FROM npf_aggr_ast_val
+            WHERE ac_sk = ac.ac_sk
+              AND instr_id = val.instr_id
+              AND valn_as_of_date <= p.valn_as_of_date
+         )
+    JOIN npf_asset        ast
+      ON ast.instr_id = val.instr_id
+    JOIN npf_asset_catg   cat
+      ON ast.iss_type   = cat.iss_type
+     AND cat.rptg_type  = p.rptg_type
+  ),
+  asset_future AS (
+    SELECT
+      ac.ac_sk,
+      ast.cntry_risk_dcde,
+      ast.prim_trd_exch_dcde,
+      ast.ast_short_desc,
+      ast.instr_id,
+      ast.man_aggr_ast_id,
+      ast.isin_id,
+      ast.cusip_id,
+      ast.sedol_id,
+      ast.tkr_sym_id,
+      ast.iss_type           AS iss_type,
+      val.valn_as_of_date,
+      val.start_date,
+      val.end_date,
+      cat.subcatg_desc,
+      ast.prc_curr_dcde,
+      0                      AS mv_bse_amt,
+      0                      AS shr_hld,
+      0                      AS adj_bas_bse_amt,
+      cat.iss_type           AS iss_type_1,
+      0                      AS mv_lcl_amt,
+      0                      AS adj_bas_lcl_amt,
+      ast.loc_commt_amt,
+      ast.loc_fund_amt
+    FROM params p
+    JOIN npf_account      ac
+      ON ac.ac_sk = p.ac_sk
+    JOIN npf_aggr_ast_val val
+      ON val.ac_sk = ac.ac_sk
+     AND val.valn_as_of_date = (
+           SELECT MAX(valn_as_of_date)
+             FROM npf_aggr_ast_val
+            WHERE ac_sk           = ac.ac_sk
+              AND instr_id        = val.instr_id
+              AND valn_as_of_date > p.valn_as_of_date
+         )
+    JOIN npf_asset        ast
+      ON ast.instr_id = val.instr_id
+    JOIN npf_asset_catg   cat
+      ON ast.iss_type   = cat.iss_type
+     AND cat.rptg_type  = p.rptg_type
+    WHERE NOT EXISTS (
+      SELECT 1
+        FROM npf_aggr_ast_val val2
+       WHERE val2.ac_sk           = ac.ac_sk
+         AND val2.instr_id        = val.instr_id
+         AND val2.valn_as_of_date <= p.valn_as_of_date
+    )
+  ),
+
+  combined AS (
+    SELECT * FROM asset_base
+    UNION ALL
+    SELECT * FROM asset_future
+  )
+
+SELECT
+  t.*,
+  COUNT(*) OVER() AS total_count
+FROM (
+  SELECT * FROM asset_base
+  WHERE :p_asset_list = 'FALSE'
+  
+  UNION ALL
+  
+  SELECT * FROM combined
+  WHERE :p_asset_list = 'TRUE'
+) AS t
+ORDER BY t.ast_short_desc;
