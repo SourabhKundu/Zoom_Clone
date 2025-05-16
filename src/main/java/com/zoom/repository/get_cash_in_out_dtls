@@ -1,0 +1,47 @@
+SELECT
+  ac.ac_sk                         AS po_ac_sk,
+  ac.bk_id                         AS po_bk_id,
+  ac.cm_data_src_id                AS po_cm_data_src_id,
+  nt.tran_proc_time                AS po_tran_proc_time,
+  tran.subcatg_desc                AS po_subcatg_desc,
+  nt.tran_long_desc                AS po_tran_long_desc,
+  nt.net_cash_bse_amt              AS po_net_cash_bse_amt,
+  tran_settle.actl_set_date_time   AS po_actl_set_date_time,
+  (
+    SELECT d.dcde_desc
+      FROM npf_decode AS d
+     WHERE d.dcde_type = 'IMG_URL_TYPE'
+       AND d.dcde_code = 'IMG_URL_CODE'
+     LIMIT 1
+  )                                 AS po_chk_img_url,
+
+  tran_bk.img_avail_flg            AS po_chk_img_flg,
+  tran_bk.ck_nbr                   AS po_chk_nbr,
+  tran_bk.seq_num                  AS po_seq_num
+
+FROM npf_transaction    AS nt
+JOIN npf_tran_catg     AS tran
+  ON nt.tran_code    = tran.tran_code
+ AND nt.data_src_id  = tran.data_src_id
+
+JOIN npf_account      AS ac
+  ON nt.ac_sk        = ac.ac_sk
+
+JOIN npf_tran_settle  AS tran_settle
+  ON nt.transaction_sk = tran_settle.transaction_sk
+
+LEFT JOIN npf_tran_bk AS tran_bk
+  ON nt.transaction_sk = tran_bk.transaction_sk
+
+WHERE nt.ac_sk               = :p_ac_sk
+  AND nt.net_cash_bse_amt    <> 0
+  AND nt.supr_tran_dcde      <> :p_supr_tran_dcde
+  AND tran.rptg_type         = :p_rptg_type
+  AND nt.revl_type_dcde    IN ('NA','RV')
+  AND (
+       (:p_flag = 'CASH_IN'  AND nt.net_cash_bse_amt > 0)
+    OR (:p_flag = 'CASH_OUT' AND nt.net_cash_bse_amt < 0)
+  )
+  AND tran_settle.actl_set_date_time 
+        BETWEEN :p_st_date AND :p_end_date
+;
