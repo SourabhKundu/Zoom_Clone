@@ -1,0 +1,34 @@
+WITH
+  lcl_rate AS (
+    SELECT mean_rt_amt AS rate
+    FROM npf_exch_rt
+    WHERE lcl_curr_dcde = :p_lcl_curr_dcde
+      AND as_of_date = (
+        SELECT MAX(as_of_date)
+        FROM npf_exch_rt
+        WHERE lcl_curr_dcde = :p_lcl_curr_dcde
+          AND as_of_date <= :p_as_of_date
+      )
+  ),
+  bse_rate AS (
+    SELECT mean_rt_amt AS rate
+    FROM npf_exch_rt
+    WHERE lcl_curr_dcde = :p_bse_curr_dcde
+      AND as_of_date = (
+        SELECT MAX(as_of_date)
+        FROM npf_exch_rt
+        WHERE lcl_curr_dcde = :p_bse_curr_dcde
+          AND as_of_date <= :p_as_of_date
+      )
+  )
+
+SELECT
+  CASE
+    WHEN :p_bse_curr_dcde = $p_lcl_curr_dcde THEN 1.0
+
+    WHEN :p_bse_curr_dcde = 'USD' THEN (SELECT rate FROM lcl_rate)
+
+    WHEN :p_lcl_curr_dcde = 'USD' THEN 1.0 / (SELECT rate FROM bse_rate)
+
+    ELSE (SELECT rate FROM lcl_rate) / (SELECT rate FROM bse_rate)
+  END AS exch_rt;
