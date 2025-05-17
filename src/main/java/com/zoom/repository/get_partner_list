@@ -1,0 +1,55 @@
+WITH params AS (
+  SELECT
+    :p_cust_sk::NUMBER       AS cust_sk,
+    :p_first_index::INT      AS first_index,
+    :p_last_index::INT       AS last_index,
+    UPPER(SPLIT_PART(:p_sort_by_cols,' ',1)) AS sort_col,
+    UPPER(SPLIT_PART(:p_sort_by_cols,' ',2)) AS sort_dir
+)
+SELECT
+  partner.cust_sk                   AS cust_sk,
+  partner.prtnr_prtnr_sk            AS partner_sk,
+  partner.prtnr_prtnr_id            AS partner_id,
+  partner.prtnr_prtnr_desc          AS partner_desc,
+  partner.tx_id_type                AS tx_id_type,
+  partner.tx_id                     AS tx_id,
+  partner.addr_ln_1                 AS addr_ln_1,
+  partner.addr_ln_2                 AS addr_ln_2,
+  partner.city_nm                   AS city_nm,
+  partner.zip_post_dcde             AS zip_post_dcde,
+  partner.cntry_dcde                AS cntry_dcde,
+  partner.st_prvnc_dcde             AS st_prvnc_dcde,
+  partner.st_prvnc_nm               AS st_prvnc_nm,
+  COUNT(*) OVER ()                  AS total_count,
+  ROW_NUMBER() OVER (
+    ORDER BY
+      CASE 
+        WHEN params.sort_col = 'PRTNR_PRTNR_DESC' AND params.sort_dir = 'ASC'  
+          THEN partner.prtnr_prtnr_desc 
+      END,
+      CASE 
+        WHEN params.sort_col = 'PRTNR_PRTNR_DESC' AND params.sort_dir = 'DESC' 
+          THEN partner.prtnr_prtnr_desc 
+      END DESC,
+      CASE 
+        WHEN params.sort_col = 'PARTNER_ID' AND params.sort_dir = 'ASC'  
+          THEN partner.prtnr_prtnr_id 
+      END,
+      CASE 
+        WHEN params.sort_col = 'PARTNER_ID' AND params.sort_dir = 'DESC' 
+          THEN partner.prtnr_prtnr_id 
+      END DESC,
+      CASE 
+        WHEN params.sort_col = 'TX_ID' AND params.sort_dir = 'ASC'  
+          THEN partner.tx_id 
+      END,
+      CASE 
+        WHEN params.sort_col = 'TX_ID' AND params.sort_dir = 'DESC' 
+          THEN partner.tx_id 
+      END DESC
+  ) AS rn
+FROM npf_mstr_prtnr_prtnr AS partner
+JOIN params ON partner.cust_sk = params.cust_sk
+WHERE partner.ptnr_stat_dcde = 'ACTIVE'
+QUALIFY rn BETWEEN params.first_index AND params.last_index
+ORDER BY rn;
