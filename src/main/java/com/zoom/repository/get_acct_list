@@ -1,0 +1,125 @@
+WITH
+  user_info AS (
+    SELECT user_sk
+      FROM npf_user
+     WHERE login_id = :p_login_id
+  ),
+
+  user_mod AS (
+    SELECT
+      npf_security_pkg.get_generic_id(user_sk, :p_cust_sk) AS user_sk_mod
+    FROM user_info
+  ),
+  acu AS (
+    SELECT
+      xref.cust_sk,
+      ac.ac_sk,
+      ac.ac_id,
+      COALESCE(caa.ac_alias, caa.upd_ac_desc, ac.ac_desc) AS ac_desc,
+      ac.data_src_id
+    FROM npf_ac_cust_user AS xref
+    JOIN user_mod         AS um   ON xref.user_sk = um.user_sk_mod
+    JOIN npf_account      AS ac   ON xref.ac_sk   = ac.ac_sk
+    LEFT JOIN npf_cust_ac_alias AS caa
+      ON xref.cust_sk = caa.cust_sk
+     AND xref.ac_sk   = caa.ac_sk
+    WHERE xref.cust_sk     = :p_cust_sk
+      AND ac.ac_stat_dcde <> 'CLOSED'
+  ),
+  dc_ac AS (
+    SELECT
+      CASE
+        WHEN enrl_decoder_sk  > 0
+         AND (tot_dec_ac - enrl_decoder_sk) = 0
+        THEN decoder_sk
+        ELSE ac_sk
+      END AS ac_sk,
+      ac_id,
+      ac_desc,
+      cust_sk,
+      data_src_id
+    FROM (
+      SELECT
+        COUNT(ndx.decoder_ac_sk) OVER (PARTITION BY ndx.decoder_ac_sk) AS enrl_decoder_sk,
+        ndx.decoder_ac_sk                                    AS decoder_sk,
+        acu.*
+      FROM acu
+      LEFT JOIN npf_decoder_xref AS ndx
+        ON acu.ac_sk   = ndx.cmpnt_ac_sk
+       AND acu.cust_sk = ndx.cust_sk
+      WHERE acu.data_src_id <> 12
+    ) AS joined1
+    FULL OUTER JOIN (
+      SELECT
+        decoder_ac_sk,
+        COUNT(decoder_ac_sk) OVER (PARTITION BY decoder_ac_sk) AS tot_dec_ac
+      FROM npf_decoder_xref
+      WHERE cust_sk = :p_cust_sk
+    ) AS joined2
+      ON joined2.decoder_ac_sk = joined1.decoder_sk
+    WHERE (
+      CASE
+        WHEN enrl_decoder_sk  > 0
+         AND (tot_dec_ac - enrl_decoder_sk) = 0
+         AND tot_dec_ac = 2
+         AND data_src_id = 1 THEN 'y'
+        WHEN enrl_decoder_sk  > 0
+         AND (tot_dec_ac - enrl_decoder_sk) = 0
+         AND tot_dec_ac = 1 THEN 'y'
+        WHEN enrl_decoder_sk  > 0
+         AND (tot_dec_ac - enrl_decoder_sk) = 0
+         AND tot_dec_ac = 2
+         AND data_src_id = 2 THEN 'n'
+        ELSE 'y'
+      END
+    ) = 'y'
+  ),
+  partner_ac AS (
+    SELECT
+      acu.ac_sk,
+      acu.ac_id,
+      acu.ac_desc
+    FROM acu
+    JOIN npf_mstr_prtnr_ac    AS prtnr_ac
+      ON prtnr_ac.ac_sk = acu.ac_sk
+    JOIN npf_mstr_prtnr_prtnr AS prtnr
+      ON prtnr.prtnr_prtnr_sk = prtnr_ac.prtnr_prtnr_sk
+    WHERE acu.data_src_id = 12
+  ),
+  all_ac AS (
+    SELECT ac_sk, ac_id, ac_desc FROM dc_ac
+    UNION ALL
+    SELECT ac_sk, ac_id, ac_desc FROM partner_ac
+  )
+SELECT
+  a.ac_sk,
+  a.ac_id,
+  a.ac_desc,
+  COALESCE(
+    CASE
+      WHEN :p_attrb_hdr_seq = 1 THEN s.attrb_id_1
+      WHEN :p_attrb_hdr_seq = 2 THEN s.attrb_id_2
+      WHEN :p_attrb_hdr_seq = 3 THEN s.attrb_id_3
+      WHEN :p_attrb_hdr_seq = 4 THEN s.attrb_id_4
+      WHEN :p_attrb_hdr_seq = 5 THEN s.attrb_id_5
+      ELSE NULL
+    END,
+    $p_attrb_hdr_seq
+  ) AS attrb_id,
+  COALESCE(
+    CASE
+      WHEN :p_attrb_hdr_seq = 1 THEN s.attrb_desc_1
+      WHEN :p_attrb_hdr_seq = 2 THEN s.attrb_desc_2
+      WHEN :p_attrb_hdr_seq = 3 THEN s.attrb_desc_3
+      WHEN :p_attrb_hdr_seq = 4 THEN s.attrb_desc_4
+      WHEN :p_attrb_hdr_seq = 5 THEN s.attrb_desc_5
+      ELSE NULL
+    END,
+    'Unassigned'
+  ) AS attrb_desc
+FROM all_ac AS a
+LEFT JOIN wpa_ac_attrib_set AS s
+  ON s.cust_sk = :p_cust_sk
+ AND s.ac_sk   = a.ac_sk
+ORDER BY a.ac_id
+;
