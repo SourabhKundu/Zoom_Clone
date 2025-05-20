@@ -1,0 +1,99 @@
+-- 0) set your inputs once per session
+-- SET p_user_id    = 'YOUR_USER_ID';
+-- SET p_sponsor_id = 'YOUR_SPONSOR_ID';
+
+WITH 
+  params AS (
+    SELECT
+      TRIM($p_user_id)    AS user_id,
+      TRIM($p_sponsor_id) AS sponsor_id
+  ),
+
+  user_base AS (
+    SELECT
+      u.user_sk,
+      u.user_type_dcde,
+      u.login_id,
+      c.cust_sk,
+      c.spnsr_code
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_USER     AS u
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CUSTOMER AS c
+      ON c.spnsr_code = (SELECT sponsor_id FROM params)
+    WHERE u.login_id = (SELECT user_id FROM params)
+  ),
+
+  users AS (
+    SELECT
+      user_sk,
+      cust_sk,
+      login_id,
+      CASE
+        WHEN user_type_dcde = 'IN' THEN 
+          (
+            SELECT usr2.user_sk
+            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_USER AS usr2
+            WHERE usr2.user_type_dcde = 'GI'
+              AND usr2.login_id LIKE spnsr_code || '%'
+            LIMIT 1
+          )
+        ELSE user_sk
+      END AS userxx_sk
+    FROM user_base
+  ),
+
+  hdr_seq AS (
+    SELECT DISTINCT a.attrb_hdr_seq AS attr_id
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_ATTRIBUTE    AS a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_ATTRB     AS aa
+      ON a.attrb_id = aa.attrb_id
+     AND a.cust_sk  = aa.cust_sk
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER AS acu
+      ON aa.ac_sk    = acu.ac_sk
+     AND acu.cust_sk = (SELECT cust_sk   FROM users)
+     AND acu.user_sk = (SELECT userxx_sk FROM users)
+
+    UNION ALL
+
+    SELECT attrb_hdr_seq
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CUST_ATTRB_HDR
+    WHERE cust_sk       = (SELECT cust_sk FROM users)
+      AND attrb_hdr_txt IS NOT NULL
+  )
+
+SELECT
+  d.dcde_code
+FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_DECODE AS d
+WHERE d.dcde_type = 'ORC_ATTRIB_CHECK'
+  AND d.dcde_desc NOT IN (
+    SELECT 'Attribute ' || attr_id
+    FROM hdr_seq
+  )
+
+UNION ALL
+
+SELECT
+  d.dcde_code
+FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_DECODE AS d
+WHERE 
+  NPF_ASA_canAliasAccess.canAliasAccess(
+    (SELECT login_id FROM users),       -- v_login_id
+    140,                                 -- rpt_sec_grp = 'PerfComb'
+    101,                                 -- fixed per package
+    (SELECT cust_sk  FROM users),       -- p_cust_sk
+    'CUSTSK=' || (SELECT cust_sk FROM users)
+  ) <> 0
+  AND d.dcde_type IN ('ORC_ROR_CDE_TAB_232','ORC_ROR_CDE_TAB_243')
+;
+
+SELECT
+  d.dcde_code
+FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_DECODE AS d
+WHERE 
+  NPF_ASA_canAliasAccess.canAliasAccess(
+    (SELECT user_id   FROM params),
+    168,
+    101,
+    NULL,
+    'CUSTSK=' || (SELECT cust_sk FROM users)
+  ) <> 0
+  AND d.dcde_type = 'ORC_SCHEMA_SECUR_TYP';
