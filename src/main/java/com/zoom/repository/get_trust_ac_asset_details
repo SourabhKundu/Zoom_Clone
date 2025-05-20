@@ -1,0 +1,108 @@
+WITH
+  strm AS (
+    SELECT
+      MAX(run.stream_load_date) AS strm_date
+    FROM npf_data_src_stream_wlt_ac_vw ac
+    JOIN npf_data_src_stream_wlt_run_vw run
+      ON run.src_stream_id = ac.src_stream_id
+    WHERE ac.ac_sk = :p_ac_sk
+      AND run.src_stream_stat = 'NPF_DATALOAD_SUCCESS'
+  ),
+
+  load_dt AS (
+    SELECT
+      TRUNC(data_load_date) AS data_load_date
+    FROM npf_data_load_date
+  ),
+
+  flags AS (
+    SELECT
+      NVL(
+        (SELECT dcde_desc 
+           FROM npf_decode 
+          WHERE dcde_type = 'GDR_ENBL_FLG'
+            AND dcde_code = 'GDR_GLBL'
+          LIMIT 1),
+        'N'
+      ) AS gdr_glbl_flag,
+      NVL(
+        (SELECT dcde_desc 
+           FROM npf_decode 
+          WHERE dcde_type = 'GDR_ENBL_FLG'
+            AND dcde_code = 'LNKD_ASSET'
+          LIMIT 1),
+        'N'
+      ) AS gdr_lnkd_asset_flag
+  ),
+
+  raw_bus_day AS (
+    SELECT
+      CASE
+        WHEN f.gdr_lnkd_asset_flag = 'Y'
+          AND f.gdr_glbl_flag = 'Y'
+        THEN COALESCE(s.strm_date, l.data_load_date)
+        ELSE l.data_load_date
+      END AS day0
+    FROM strm     AS s
+    CROSS JOIN load_dt AS l
+    CROSS JOIN flags   AS f
+  ),
+
+  bus_day AS (
+    SELECT
+      CASE TRIM(TO_CHAR(r.day0,'DAY'))
+        WHEN 'SATURDAY' THEN DATEADD(day,-1,r.day0)
+        WHEN 'SUNDAY'   THEN DATEADD(day,-2,r.day0)
+        ELSE r.day0
+      END AS valn_date
+    FROM raw_bus_day AS r
+  ),
+
+  is_decoder AS (
+    SELECT COUNT(*) > 0 AS yesno
+    FROM npf_decoder_xref
+    WHERE decoder_ac_sk = :p_ac_sk
+  ),
+
+  dec_ac AS (
+    SELECT cmpnt_ac_sk
+    FROM npf_decoder_xref
+    WHERE decoder_ac_sk = :p_ac_sk
+  )
+
+SELECT DISTINCT
+  ast.instr_id,
+  ast.tnt_sec_id,
+  COALESCE(ast.ast_short_desc, ast.ast_long_desc) AS ast_desc,
+  acc2.ac_id
+FROM npf_position       np
+JOIN npf_account        acc
+  ON np.ac_sk          = acc.ac_sk
+LEFT JOIN npf_mstr_prtnr_ac mstr
+  ON mstr.LNKD_AC_SK  = np.ac_sk
+ AND mstr.instr_id    = np.instr_id
+JOIN npf_asset         ast
+  ON ast.instr_id     = np.instr_id
+LEFT JOIN npf_account   acc2
+  ON acc2.ac_sk       = mstr.ac_sk
+JOIN npf_asset_catg    ast_catg
+  ON ast_catg.iss_type      = ast.iss_type
+ AND ast_catg.supcatg_code <> '90'
+ AND ast_catg.rptg_type     = 'WLT'
+JOIN bus_day            bd
+  ON CAST(np.valn_as_of_date AS DATE) = bd.valn_date
+JOIN is_decoder        id
+  ON TRUE
+LEFT JOIN dec_ac        dac
+  ON acc.ac_sk        = dac.cmpnt_ac_sk
+WHERE
+  (
+    id.yesno
+    AND acc.ac_sk IN (SELECT cmpnt_ac_sk FROM dec_ac)
+  )
+  OR
+  (
+    NOT id.yesno
+    AND acc.ac_sk = :p_ac_sk
+  )
+ORDER BY ast_desc;
