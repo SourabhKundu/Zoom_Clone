@@ -1,4 +1,104 @@
 WITH
+  params AS (
+    SELECT 
+      $p_cust_sk  AS cust_sk,
+      $p_login_id AS login_id
+  ),
+
+  user_base AS (
+    SELECT
+      u.user_sk,
+      u.user_type_dcde,
+      u.login_id,
+      c.cust_sk,
+      c.spnsr_code
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_USER     AS u
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CUSTOMER AS c
+      ON c.cust_sk = (SELECT cust_sk  FROM params)
+    WHERE u.login_id = (SELECT login_id FROM params)
+  ),
+
+  users AS (
+    SELECT
+      user_sk                                        AS orig_user_sk,
+      cust_sk,
+      spnsr_code                                      AS sponsor_id,
+      CASE
+        WHEN user_type_dcde = 'IN' THEN (
+          SELECT usr2.user_sk
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_USER AS usr2
+          WHERE usr2.user_type_dcde = 'GI'
+            AND usr2.login_id LIKE spnsr_code || '%'
+          LIMIT 1
+        )
+        ELSE user_sk
+      END                                             AS userxx_sk
+    FROM user_base
+  ),
+
+  load_date AS (
+    SELECT 
+      DATE_TRUNC('DAY', DATA_LOAD_DATE) AS rpt_date
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_DATA_LOAD_DATE
+    LIMIT 1
+  ),
+
+  consl_real AS (
+    SELECT
+      c.consl_sk,
+      'CONSL' || c.consl_sk          AS code,
+      c.consl_desc                   AS decode,
+      1                               AS sortset,
+      c.consl_desc                   AS sortcol,
+      cu.user_dflt_consl_flag,
+      'FAM'                           AS account_type,
+      u.sponsor_id,
+      NVL(c.consl_xref_id, c.consl_desc) AS obj_id,
+      ld.rpt_date
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CONSL             AS c
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CONSL_USER_ACCESS AS cu
+      ON cu.consl_sk = c.consl_sk
+     AND cu.user_sk   = (SELECT orig_user_sk FROM users)
+    JOIN users AS u
+      ON u.orig_user_sk = cu.user_sk
+    CROSS JOIN load_date AS ld
+    WHERE c.cust_sk            = (SELECT cust_sk FROM users)
+      AND c.consl_stat_dcde    = 'ACTIVE'
+      AND cu.consl_user_stat_dcde = 'ACTIVE'
+      AND cu.rpt_incl_flag     = 'Y'
+  ),
+
+  consl_generic AS (
+    SELECT
+      c.consl_sk,
+      'CONSL' || c.consl_sk          AS code,
+      c.consl_desc                   AS decode,
+      1                               AS sortset,
+      c.consl_desc                   AS sortcol,
+      cu.user_dflt_consl_flag,
+      'FAM'                           AS account_type,
+      u.sponsor_id,
+      NVL(c.consl_xref_id, c.consl_desc) AS obj_id,
+      ld.rpt_date
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CONSL             AS c
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CONSL_USER_ACCESS AS cu
+      ON cu.consl_sk = c.consl_sk
+     AND cu.user_sk   = (SELECT userxx_sk FROM users)
+    JOIN users AS u
+      ON u.userxx_sk = cu.user_sk
+    CROSS JOIN load_date AS ld
+    WHERE c.cust_sk            = (SELECT cust_sk FROM users)
+      AND c.consl_stat_dcde    = 'ACTIVE'
+      AND cu.consl_user_stat_dcde = 'ACTIVE'
+      AND cu.rpt_incl_flag     = 'Y'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CONSL_USER_ACCESS cu2
+        WHERE cu2.consl_sk = c.consl_sk
+          AND cu2.user_sk  = (SELECT orig_user_sk FROM users)
+      )
+  ),
+
   ac_det AS (
     SELECT
       acct.ac_sk,
@@ -7,18 +107,18 @@ WITH
       COUNT(ndx.cmpnt_ac_sk) OVER (PARTITION BY ndx.decoder_ac_sk) AS enrl_ac_cnt,
       ndx.decoder_ac_sk,
       ndx.decoder_ac_id,
-      NVL(acct.npf_data_load_date, ld.rpt_date) AS load_date
+      NVL(acct.npf_data_load_date, ld.rpt_date)     AS load_date
     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_ACCOUNT           AS acct
-    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER      AS acuser
-      ON acuser.ac_sk    = acct.ac_sk
-     AND acuser.cust_sk  = (SELECT cust_sk FROM users)
-     AND acuser.actv_flag= 'Y'
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER      AS au
+      ON au.ac_sk    = acct.ac_sk
+     AND au.cust_sk  = (SELECT cust_sk FROM users)
+     AND au.actv_flag= 'Y'
     LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_DECODER_XREF  AS ndx
-      ON ndx.cmpnt_ac_sk = acuser.ac_sk
-     AND ndx.cust_sk     = acuser.cust_sk
+      ON ndx.cmpnt_ac_sk = au.ac_sk
+     AND ndx.cust_sk     = au.cust_sk
     JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_CUST_AC_ALIAS      AS alias
-      ON alias.ac_sk    = acct.ac_sk
-     AND alias.cust_sk  = acuser.cust_sk
+      ON alias.ac_sk   = acct.ac_sk
+     AND alias.cust_sk = au.cust_sk
     CROSS JOIN load_date AS ld
   ),
 
@@ -33,29 +133,24 @@ WITH
   accounts AS (
     SELECT DISTINCT
       CASE
-        -- use the ac_det alias (ad.) here
         WHEN ad.enrl_ac_cnt > 0
              AND td.tot_dec_ac - ad.enrl_ac_cnt = 0
         THEN ad.decoder_ac_sk
         ELSE ad.ac_sk
-      END                                                 AS ac_sk,
-
+      END AS ac_sk,
       'ACCOUNT' ||
       CASE
         WHEN ad.enrl_ac_cnt > 0
              AND td.tot_dec_ac - ad.enrl_ac_cnt = 0
         THEN ad.decoder_ac_sk
         ELSE ad.ac_sk
-      END                                                 AS code,
-
+      END AS code,
       ad.sortcol                                          AS decode,
-      2                                                    AS sortset,
+      2                                                   AS sortset,
       ad.sortcol                                          AS sortcol,
-      'N'                                                  AS user_dflt_consl_flag,
-      'ACC'                                                AS account_type,
-
-      (SELECT sponsor_id FROM users)                      AS sponsor_id,
-
+      'N'                                                 AS user_dflt_consl_flag,
+      'ACC'                                               AS account_type,
+      (SELECT sponsor_id FROM users)                     AS sponsor_id,
       CASE
         WHEN ad.enrl_ac_cnt > 0
              AND td.tot_dec_ac - ad.enrl_ac_cnt = 0
@@ -66,19 +161,17 @@ WITH
           WHERE ac_sk = ad.ac_sk
         )
       END                                                 AS obj_id,
-
       ld.rpt_date                                         AS rpt_date
-
     FROM ac_det AS ad
     LEFT JOIN tot_decoder_ac AS td
       ON td.decoder_ac_sk = ad.decoder_ac_sk
     CROSS JOIN load_date AS ld
-
     WHERE
       CASE
         WHEN ad.enrl_ac_cnt > 0
              AND td.tot_dec_ac - ad.enrl_ac_cnt = 0
-             AND ( (td.tot_dec_ac = 2 AND ad.data_src_id = 1) OR td.tot_dec_ac = 1 )
+             AND ((td.tot_dec_ac = 2 AND ad.data_src_id = 1)
+                  OR td.tot_dec_ac = 1)
         THEN 'Y'
         WHEN ad.enrl_ac_cnt > 0
              AND td.tot_dec_ac - ad.enrl_ac_cnt = 0
