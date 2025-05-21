@@ -1,0 +1,129 @@
+WITH
+  user_info AS (
+    SELECT user_type_dcde
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user
+    WHERE user_sk = :p_user_sk
+  ),
+
+  ac_det_non_in AS (
+    SELECT
+      COUNT(ndx.decoder_ac_sk) OVER (PARTITION BY ndx.decoder_ac_sk)        AS enrl_decoder_sk,
+      ndx.decoder_ac_sk              AS decoder_sk,
+      ndx.decoder_ac_id              AS decoder_ac_id,
+      acct.ac_sk,
+      acct.ac_id,
+      acct.data_src_id,
+      SUBSTR(
+        COALESCE(alias.ac_alias, alias.upd_ac_desc, acct.ac_desc)
+      , 1, 40
+      )                                 AS temp_ac_desc
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account acct
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_cust_user acuser
+      ON acct.ac_sk = acuser.ac_sk
+      AND acuser.user_sk = :p_user_sk
+      AND acuser.cust_sk = :p_cust_sk
+      AND acuser.actv_flag = 'Y'
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_cust_ac_alias alias
+      ON alias.ac_sk   = acct.ac_sk
+      AND alias.cust_sk = :p_cust_sk
+    LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref ndx
+      ON acuser.ac_sk = ndx.cmpnt_ac_sk
+    WHERE acct.data_src_id IN (1,2)
+  ),
+  decode1 AS (
+    SELECT
+      decoder_ac_sk,
+      COUNT(decoder_ac_sk) OVER (PARTITION BY decoder_ac_sk) AS tot_dec_ac
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref
+  ),
+  first_branch AS (
+    SELECT DISTINCT
+      CASE
+        WHEN enrl_decoder_sk > 0 
+             AND (tot_dec_ac - enrl_decoder_sk) = 0
+        THEN decoder_sk
+        ELSE ac_sk
+      END AS ac_sk,
+      CASE
+        WHEN enrl_decoder_sk > 0 
+             AND (tot_dec_ac - enrl_decoder_sk) = 0
+        THEN decoder_ac_id
+        ELSE ac_id
+      END AS ac_id,
+      CASE
+        WHEN enrl_decoder_sk > 0 
+             AND (tot_dec_ac - enrl_decoder_sk) = 0
+        THEN temp_ac_desc || ' - ' || decoder_ac_id
+        ELSE temp_ac_desc || ' - ' || ac_id
+      END AS ac_desc,
+      data_src_id
+    FROM ac_det_non_in ad
+    LEFT JOIN decode1 d
+      ON d.decoder_ac_sk = ad.decoder_sk
+    WHERE
+      CASE
+        WHEN enrl_decoder_sk > 0
+             AND (tot_dec_ac - enrl_decoder_sk) = 0
+             AND tot_dec_ac = 2
+             AND data_src_id = 1 THEN 'y'
+        WHEN enrl_decoder_sk > 0
+             AND (tot_dec_ac - enrl_decoder_sk) = 0
+             AND tot_dec_ac = 1 THEN 'y'
+        WHEN enrl_decoder_sk > 0
+             AND (tot_dec_ac - enrl_decoder_sk) = 0
+             AND tot_dec_ac = 2
+             AND data_src_id = 2 THEN 'n'
+        ELSE 'y'
+      END = 'y'
+  ),
+  ac_det_in AS (
+    SELECT
+      ndx.decoder_ac_sk AS decoder_sk,
+      ndx.decoder_ac_id AS decoder_ac_id,
+      acct.ac_sk,
+      acct.ac_id,
+      acct.data_src_id,
+      SUBSTR(
+        COALESCE(alias.ac_alias, alias.upd_ac_desc, acct.ac_desc)
+      , 1, 40
+      ) AS temp_ac_desc
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account acct
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_cust_ac_alias alias
+      ON alias.ac_sk   = acct.ac_sk
+      AND alias.cust_sk = :p_cust_sk
+    LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref ndx
+      ON acct.ac_sk = ndx.cmpnt_ac_sk
+    WHERE acct.data_src_id IN (1,2)
+  ),
+  second_branch AS (
+    SELECT DISTINCT
+      CASE WHEN tot_dec_ac > 0 THEN decoder_sk ELSE ac_sk END   AS ac_sk,
+      CASE WHEN tot_dec_ac > 0 THEN decoder_ac_id ELSE ac_id END AS ac_id,
+      CASE 
+        WHEN tot_dec_ac > 0
+        THEN temp_ac_desc || ' - ' || decoder_ac_id
+        ELSE temp_ac_desc || ' - ' || ac_id
+      END                                                      AS ac_desc,
+      data_src_id
+    FROM ac_det_in ad
+    LEFT JOIN decode1 d
+      ON d.decoder_ac_sk = ad.decoder_sk
+    WHERE
+      CASE
+        WHEN tot_dec_ac = 2 AND data_src_id = 1 THEN 'y'
+        WHEN tot_dec_ac = 1 THEN 'y'
+        WHEN tot_dec_ac = 2 AND data_src_id = 2 THEN 'n'
+        ELSE 'y'
+      END = 'y'
+  )
+SELECT ac_sk, ac_id, ac_desc, data_src_id
+FROM first_branch
+WHERE (SELECT user_type_dcde FROM user_info) <> 'IN'
+
+UNION ALL
+
+SELECT ac_sk, ac_id, ac_desc, data_src_id
+FROM second_branch
+WHERE (SELECT user_type_dcde FROM user_info) = 'IN'
+
+ORDER BY UPPER(ac_desc);
