@@ -1,4 +1,4 @@
-// Get Account DTLS
+//GET_ACCOUNT_DTLS
 
 WITH 
   dec AS (
@@ -45,7 +45,7 @@ WITH
       ON a.instr_id = b.instr_id
   ),
 
-  tx_id_base AS (
+  special_data_sources AS (
     SELECT DISTINCT
       cm_data_src_id
     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
@@ -62,12 +62,12 @@ WITH
         THEN SUBSTR(ac_mds.ACCOUNT_LEGAL_IDENTIFIER,2)
         ELSE ac_mds.ACCOUNT_LEGAL_IDENTIFIER
       END AS cleaned_tx,
-      CASE WHEN ac_mds.cm_data_src_id IN (SELECT cm_data_src_id FROM tx_id_base)
+      CASE WHEN sys_map.nrn_src_sys IN (SELECT cm_data_src_id FROM special_data_sources)
            THEN TRUE ELSE FALSE END AS needs_substr
     FROM DEV_NPF_DB.CDC_DIRECT.NPF_MDS_ACCOUNT_LOAD_AUD ac_mds
-    JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_LOAD_ACT_PART_AUD k
+    INNER JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_LOAD_ACT_PART_AUD k
       ON ac_mds.n_mds_db = k.active_partition
-    JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_NRN_ACC_SRC_SYS_MAP_AUD sys_map
+    INNER JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_NRN_ACC_SRC_SYS_MAP_AUD sys_map
       ON ac_mds.source_system_type = sys_map.mds_src_sys
       AND (
         sys_map.mds_prod_line = ac_mds.product_line
