@@ -1,4 +1,5 @@
-//GET_ACCOUNT_DTLS
+// GET_ACCOUNT_DTLS
+
 
 WITH 
   dec AS (
@@ -53,7 +54,7 @@ WITH
       AND cm_data_src_id IS NOT NULL
   ),
 
-  tx_id_data AS (
+  tx_id_prep AS (
     SELECT
       sys_map.nrn_src_sys AS i_src_sys,
       ac_mds.CONTRACT_ID AS i_nrn_ac,
@@ -106,6 +107,32 @@ WITH
     WHERE CUST_SK = 1234
   ),
 
+  -- Pre-join all decode tables
+  decode_data AS (
+    SELECT 
+      d1.dcde_code AS curr_code,
+      d1.dcde_desc AS curr_desc,
+      d2.dcde_code AS liab_code,
+      d2.dcde_desc AS liab_desc,
+      d3.dcde_code AS inv_code,
+      d3.dcde_desc AS inv_desc,
+      d3.dcde_type AS inv_type
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode d1
+    LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode d2
+      ON d2.dcde_type = 'LIABFLAG'
+    LEFT JOIN (
+      SELECT dcde_code, dcde_desc, 'INVOBJ' AS dcde_type 
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode 
+      WHERE dcde_type = 'INVOBJ'
+      UNION ALL
+      SELECT dcde_code, dcde_desc, 'PCRSTYLE' AS dcde_type 
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode 
+      WHERE dcde_type = 'PCRSTYLE'
+    ) d3 ON 1=1
+    WHERE d1.dcde_type = 'CURRDDLB'
+  ),
+
+  -- Main account data with all joins
   account_data AS (
     SELECT
       ac.*,
@@ -160,7 +187,7 @@ WITH
       ON lnkd_ac.ac_sk = ac.ac_sk
     LEFT JOIN lnkd_ast_info lnkd_ast 
       ON lnkd_ast.ac_sk = ac.ac_sk
-    LEFT JOIN tx_id_data tx 
+    LEFT JOIN tx_id_prep tx 
       ON tx.i_src_sys = ac.cm_data_src_id AND tx.i_nrn_ac = ac.cm_ac_id
     LEFT JOIN account_access aa 
       ON aa.AC_SK = ac.ac_sk
@@ -168,42 +195,9 @@ WITH
       ON up.AC_SK = ac.ac_sk
     LEFT JOIN account_attrs attr 
       ON attr.ac_sk = ac.ac_sk
-  ),
-
-  currency_desc AS (
-    SELECT
-      dcde_code,
-      dcde_desc
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
-    WHERE dcde_type = 'CURRDDLB'
-  ),
-
-  liab_flag_desc AS (
-    SELECT
-      dcde_code,
-      dcde_desc
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
-    WHERE dcde_type = 'LIABFLAG'
-  ),
-
-  inv_obj_desc AS (
-    SELECT
-      dcde_code,
-      dcde_desc,
-      'INVOBJ' AS dcde_type
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
-    WHERE dcde_type = 'INVOBJ'
-    
-    UNION ALL
-    
-    SELECT
-      dcde_code,
-      dcde_desc,
-      'PCRSTYLE' AS dcde_type
-    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
-    WHERE dcde_type = 'PCRSTYLE'
   )
 
+-- Final SELECT with all calculated fields
 SELECT
   CASE
     WHEN ac_data.ac_type_grp_dcde NOT IN ('MAG','PTR')
@@ -279,13 +273,13 @@ SELECT
 
   ac_data.ac_alias,
   ac_data.bse_curr_dcde,
-  curr.dcde_desc AS bse_curr,
+  decode.curr_desc AS bse_curr,
 
   ac_data.ac_stat_dcde,
   ac_data.svc_prvdr_desc,
   ac_data.svc_prvdr_url_desc,
   ac_data.liab_flag,
-  liab.dcde_desc AS liab_flag_dcde,
+  decode.liab_desc AS liab_flag_dcde,
 
   ac_data.real_tm_upd_flag,
   ac_data.fisc_yrnd,
@@ -294,12 +288,8 @@ SELECT
   ac_data.inv_obj_dcde AS inv_obj,
   CASE
     WHEN ac_data.data_src_id IN (7,8,12)
-    THEN (SELECT dcde_desc FROM inv_obj_desc 
-          WHERE dcde_code = ac_data.inv_obj_dcde AND dcde_type = 'PCRSTYLE'
-          LIMIT 1)
-    ELSE (SELECT dcde_desc FROM inv_obj_desc 
-          WHERE dcde_code = ac_data.inv_obj_dcde AND dcde_type = 'INVOBJ'
-          LIMIT 1)
+    THEN (SELECT inv_desc FROM decode_data WHERE inv_code = ac_data.inv_obj_dcde AND inv_type = 'PCRSTYLE' LIMIT 1)
+    ELSE (SELECT inv_desc FROM decode_data WHERE inv_code = ac_data.inv_obj_dcde AND inv_type = 'INVOBJ' LIMIT 1)
   END AS inv_obj_desc,
 
   ac_data.ac_prem_calc_meth_dcde,
@@ -332,7 +322,6 @@ SELECT
        THEN ac_data.lnkd_ac_sk END AS lnkd_ac_sk
 
 FROM account_data ac_data
-LEFT JOIN currency_desc curr 
-  ON curr.dcde_code = ac_data.bse_curr_dcde
-LEFT JOIN liab_flag_desc liab 
-  ON liab.dcde_code = ac_data.liab_flag;
+LEFT JOIN decode_data decode
+  ON decode.curr_code = ac_data.bse_curr_dcde
+  OR decode.liab_code = ac_data.liab_flag;
