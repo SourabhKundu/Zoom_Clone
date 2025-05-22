@@ -1,12 +1,11 @@
 // Get Account DTLS
 
-
 WITH
   dec AS (
     SELECT
       cmpnt_ac_sk,
-      CASE WHEN 'Y' = 'Y' THEN decoder_ac_sk END   AS decoder_ac_sk,
-      CASE WHEN 'Y' = 'Y' THEN decoder_ac_id END   AS decoder_ac_id
+      CASE WHEN 'Y' = 'Y' THEN decoder_ac_sk END AS decoder_ac_sk,
+      CASE WHEN 'Y' = 'Y' THEN decoder_ac_id END AS decoder_ac_id
     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref
     WHERE decoder_ac_sk = 1234
     QUALIFY ROW_NUMBER() OVER (ORDER BY cmpnt_data_src_id, creat_tm) = 1
@@ -23,33 +22,69 @@ WITH
   lnkd_ac_cte AS (
     SELECT
       b.ac_sk,
-      a.ac_id   AS lnkd_ac_id,
+      a.ac_id AS lnkd_ac_id,
       a.ac_desc AS lnkd_ac_desc,
       b.lnkd_ac_sk
     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac b
-    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account         a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account a
       ON a.ac_sk = b.lnkd_ac_sk
   ),
 
-  tx_sub AS (
+  lnkd_ast_cte AS (
     SELECT
-      sys_map.nrn_src_sys                          AS i_src_sys,
-      ac_mds.contract_id                           AS i_nrn_ac,
-      ac_mds.account_legal_identifier              AS i_tx,
-      ROW_NUMBER() OVER (
-        PARTITION BY sys_map.nrn_src_sys, ac_mds.contract_id
-        ORDER BY ac_mds.creat_tm DESC
-      ) AS rn
+      a.ac_sk,
+      b.ast_short_desc,
+      b.ast_long_desc,
+      b.tnt_sec_id,
+      a.instr_id
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset b
+      ON a.instr_id = b.instr_id
+  ),
+
+  tx_id_data AS (
+    SELECT
+      sys_map.nrn_src_sys AS i_src_sys,
+      ac_mds.CONTRACT_ID AS i_nrn_ac,
+      ac_mds.ACCOUNT_LEGAL_IDENTIFIER AS i_tx,
+      CASE 
+        WHEN LEFT(ac_mds.ACCOUNT_LEGAL_IDENTIFIER,1) IN ('-','+') 
+        THEN SUBSTR(ac_mds.ACCOUNT_LEGAL_IDENTIFIER,2)
+        ELSE ac_mds.ACCOUNT_LEGAL_IDENTIFIER
+      END AS cleaned_tx
     FROM DEV_NPF_DB.CDC_DIRECT.NPF_MDS_ACCOUNT_LOAD_AUD ac_mds
-    JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_LOAD_ACT_PART_AUD k
+    INNER JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_LOAD_ACT_PART_AUD k
       ON ac_mds.n_mds_db = k.active_partition
-    JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_NRN_ACC_SRC_SYS_MAP_AUD sys_map
+    INNER JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_NRN_ACC_SRC_SYS_MAP_AUD sys_map
       ON ac_mds.source_system_type = sys_map.mds_src_sys
-     AND (
-           sys_map.mds_prod_line = ac_mds.product_line
+      AND (
+        sys_map.mds_prod_line = ac_mds.product_line
         OR (sys_map.mds_prod_line IS NULL AND ac_mds.product_line IS NULL)
-     )
+      )
     WHERE ac_mds.account_status_type_value <> 'Purged'
+  ),
+
+  user_defaults AS (
+    SELECT
+      usr2.DFLT_RPTG_TYPE,
+      ac2.CUST_SK,
+      ac2.AC_SK
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_USER usr2
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER ac2
+      ON usr2.USER_SK = ac2.USER_SK
+    WHERE usr2.DFLT_RPTG_TYPE = 'PCS'
+  ),
+
+  account_attributes AS (
+    SELECT
+      a.ac_sk,
+      b.attrb_id || '|' || b.attrb_desc AS attrb_desc,
+      b.cust_sk,
+      b.attrb_hdr_seq
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_attrb a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_attribute b
+      ON a.attrb_id = b.attrb_id
+    WHERE b.attrb_hdr_seq = 1
   )
 
 SELECT
@@ -66,46 +101,56 @@ SELECT
         CASE
           WHEN EXISTS (
             SELECT 1
-              FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_cust_user usr_ac
-             WHERE usr_ac.cust_sk = 1234
-               AND usr_ac.ac_sk   = ac.ac_sk
+            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER usr_ac
+            WHERE usr_ac.CUST_SK = 1234
+              AND usr_ac.AC_SK = ac.ac_sk
           )
-          THEN SUBSTR(
-                 LPAD(ac.ac_id,20,'0'),
-                 LENGTH(LPAD(ac.ac_id,20,'0')) - 3,
-                 4
-               )
-          WHEN 'Y' = 'Y'
-           AND LENGTH(ac.ac_id) > 4
-          THEN LPAD(
-                 SUBSTR(ac.ac_id, POSITION(' (' IN ac.ac_id) - 4),
-                 LENGTH(ac.ac_id),
-                 'x'
-               )
-          ELSE ac.ac_id
+          THEN SUBSTR(LPAD(ac.ac_id,20,'0'), LENGTH(LPAD(ac.ac_id,20,'0')) - 3, 4)
+          ELSE
+            CASE
+              WHEN 'Y' = 'Y'
+                AND LENGTH(ac.ac_id) > 4
+                AND COALESCE(
+                  (SELECT DFLT_RPTG_TYPE FROM user_defaults 
+                   WHERE CUST_SK = 1234 AND AC_SK = ac.ac_sk
+                   LIMIT 1),
+                  'PCS'
+                ) = 'PCS'
+              THEN LPAD(
+                SUBSTR(ac.ac_id, POSITION(' (' IN ac.ac_id) - 4),
+                LENGTH(ac.ac_id),
+                'x'
+              )
+              ELSE ac.ac_id
+            END
         END
       )
     ELSE
       CASE
         WHEN EXISTS (
           SELECT 1
-            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_cust_user usr_ac
-           WHERE usr_ac.cust_sk = 1234
-             AND usr_ac.ac_sk   = ac.ac_sk
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER usr_ac
+          WHERE usr_ac.CUST_SK = 1234
+            AND usr_ac.AC_SK = ac.ac_sk
         )
-        THEN SUBSTR(
-               LPAD(ac.ac_id,20,'0'),
-               LENGTH(LPAD(ac.ac_id,20,'0')) - 3,
-               4
-             )
-        WHEN 'Y' = 'Y'
-         AND LENGTH(ac.ac_id) > 4
-        THEN LPAD(
-               SUBSTR(ac.ac_id, POSITION(' (' IN ac.ac_id) - 4),
-               LENGTH(ac.ac_id),
-               'x'
-             )
-        ELSE ac.ac_id
+        THEN SUBSTR(LPAD(ac.ac_id,20,'0'), LENGTH(LPAD(ac.ac_id,20,'0')) - 3, 4)
+        ELSE
+          CASE
+            WHEN 'Y' = 'Y'
+              AND LENGTH(ac.ac_id) > 4
+              AND COALESCE(
+                (SELECT DFLT_RPTG_TYPE FROM user_defaults 
+                 WHERE CUST_SK = 1234 AND AC_SK = ac.ac_sk
+                 LIMIT 1),
+                'PCS'
+              ) = 'PCS'
+            THEN LPAD(
+              SUBSTR(ac.ac_id, POSITION(' (' IN ac.ac_id) - 4),
+              LENGTH(ac.ac_id),
+              'x'
+            )
+            ELSE ac.ac_id
+          END
       END
   END AS ac_id,
 
@@ -118,26 +163,15 @@ SELECT
   ac.data_src_id,
   dtltype.prod_info_url_desc,
 
-  -- Moved nested tx subquery to CTE tx_sub
   CASE
     WHEN ac.cm_data_src_id IN (
       SELECT DISTINCT cm_data_src_id
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
-       WHERE data_src_id IN (5,10)
-         AND cm_data_src_id IS NOT NULL
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
+      WHERE data_src_id IN (5,10)
+        AND cm_data_src_id IS NOT NULL
     )
-    THEN SUBSTR(
-           CASE
-             WHEN LEFT(tx.i_tx,1) IN ('-','+') THEN SUBSTR(tx.i_tx,2)
-             ELSE tx.i_tx
-           END,
-           3
-         )
-    ELSE
-      CASE
-        WHEN LEFT(tx.i_tx,1) IN ('-','+') THEN SUBSTR(tx.i_tx,2)
-        ELSE tx.i_tx
-      END
+    THEN SUBSTR(tx.cleaned_tx, 3)
+    ELSE tx.cleaned_tx
   END AS tx_id,
 
   CASE WHEN dtltype.ac_type_grp_dcde IN ('MAG','PTR') AND ac.dtl_ac_type <> 'POR'
@@ -158,46 +192,49 @@ SELECT
   END AS data_src_desc,
 
   NVL(alias.upd_ac_desc, ac.ac_desc) AS ac_desc,
+
   alias.ac_alias,
   ac.bse_curr_dcde,
   (
     SELECT dc.dcde_desc
-      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
-     WHERE dc.dcde_type = 'CURRDDLB'
-       AND dc.dcde_code = ac.bse_curr_dcde
-     LIMIT 1
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
+    WHERE dc.dcde_type = 'CURRDDLB'
+      AND dc.dcde_code = ac.bse_curr_dcde
+    LIMIT 1
   ) AS bse_curr,
+
   ac.ac_stat_dcde,
   ac.svc_prvdr_desc,
   ac.svc_prvdr_url_desc,
   ac.liab_flag,
   (
     SELECT dc.dcde_desc
-      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
-     WHERE dc.dcde_type = 'LIABFLAG'
-       AND dc.dcde_code = ac.liab_flag
-     LIMIT 1
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
+    WHERE dc.dcde_type = 'LIABFLAG'
+      AND dc.dcde_code = ac.liab_flag
+    LIMIT 1
   ) AS liab_flag_dcde,
 
   ac.real_tm_upd_flag,
   ac.fisc_yrnd,
   ac.lot_rlf_meth_dcde,
+
   ac.inv_obj_dcde AS inv_obj,
   CASE
     WHEN ac.data_src_id IN (7,8,12)
     THEN (
       SELECT dc.dcde_desc
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
-       WHERE dc.dcde_type = 'PCRSTYLE'
-         AND dc.dcde_code = ac.inv_obj_dcde
-       LIMIT 1
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
+      WHERE dc.dcde_type = 'PCRSTYLE'
+        AND dc.dcde_code = ac.inv_obj_dcde
+      LIMIT 1
     )
     ELSE (
       SELECT dc.dcde_desc
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
-       WHERE dc.dcde_type = 'INVOBJ'
-         AND dc.dcde_code = ac.inv_obj_dcde
-       LIMIT 1
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode dc
+      WHERE dc.dcde_type = 'INVOBJ'
+        AND dc.dcde_code = ac.inv_obj_dcde
+      LIMIT 1
     )
   END AS inv_obj_desc,
 
@@ -219,14 +256,11 @@ SELECT
   src.extl_flg,
 
   (
-    SELECT b.attrb_id || '|' || b.attrb_desc
-      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_attrb a
-      JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_attribute b
-        ON a.attrb_id = b.attrb_id
-     WHERE a.ac_sk         = ac.ac_sk
-       AND b.cust_sk       = alias.cust_sk
-       AND b.attrb_hdr_seq = 1
-     LIMIT 1
+    SELECT attrb_desc
+    FROM account_attributes
+    WHERE ac_sk = ac.ac_sk
+      AND cust_sk = alias.cust_sk
+    LIMIT 1
   ) AS attrb_desc1,
 
   ac.ac_memo_desc,
@@ -240,17 +274,15 @@ SELECT
        THEN lnkd_ac.lnkd_ac_sk END AS lnkd_ac_sk
 
 FROM base_ac
-JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account           ac    ON ac.ac_sk  = base_ac.base_ac_sk
-JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_cust_ac_alias     alias ON alias.ac_sk = ac.ac_sk
-                                                     AND alias.cust_sk = 1234
-JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_type           actype ON actype.ac_type = ac.ac_type
-JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type       dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
-JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_src          src    ON src.data_src_id  = ac.data_src_id
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac ON ac.ac_sk = base_ac.base_ac_sk
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk AND alias.cust_sk = 1234
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_type actype ON actype.ac_type = ac.ac_type
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_src src ON src.data_src_id = ac.data_src_id
 LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_ac_aggregation acagr ON acagr.ac_sk = ac.ac_sk
-LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_perf_indx       pi    ON pi.indx_sk  = 1234
-LEFT JOIN lnkd_ac_cte                                   lnkd_ac ON lnkd_ac.ac_sk  = ac.ac_sk
-LEFT JOIN tx_sub                                       tx     ON tx.i_src_sys = ac.cm_data_src_id
-                                                     AND tx.i_nrn_ac  = ac.cm_ac_id
-                                                     AND tx.rn       = 1
-LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac  astjoin ON astjoin.ac_sk = ac.ac_sk
-LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset          ast     ON ast.instr_id   = astjoin.instr_id;
+LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_perf_indx pi ON pi.indx_sk = 1234
+LEFT JOIN lnkd_ac_cte lnkd_ac ON lnkd_ac.ac_sk = ac.ac_sk
+LEFT JOIN lnkd_ast_cte lnkd_ast ON lnkd_ast.ac_sk = ac.ac_sk
+LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac astjoin ON astjoin.ac_sk = ac.ac_sk
+LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset ast ON ast.instr_id = astjoin.instr_id
+LEFT JOIN tx_id_data tx ON tx.i_src_sys = ac.cm_data_src_id AND tx.i_nrn_ac = ac.cm_ac_id;
