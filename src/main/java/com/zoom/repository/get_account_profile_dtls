@@ -231,9 +231,118 @@ WITH
            LATERAL TABLE(
              CASE
                WHEN df.is_decoder THEN
-                 npf_acct_prfl_pkg.getNonBankingBalsDcde(
-                   fd.ac_sk, fd.cust_sk, fd.ac_type_grp_dcde,
-                   fd.i_tx, fd.dsclmr_desc, fd.display_zero_valn
+                 (
+                   WITH
+                   cmpnts AS (
+                     SELECT cmpnt_ac_sk
+                       FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref
+                      WHERE decoder_ac_sk = fd.ac_sk
+                        AND cust_sk       = fd.cust_sk
+                      ORDER BY cmpnt_data_src_id, creat_tm
+                   ),
+                   cmpnt_vals AS (
+                     SELECT
+                       s.ac_sk,
+                       s.valn_as_of_date,
+                       s.valn_freq_dcde,
+                       s.valn_run_time,
+                       s.ac_accr_inc_bse_amt,
+                       s.ac_accr_exp_bse_amt,
+                       s.ac_mv_bse_amt,
+                       s.ac_bas_bse_amt,
+                       CASE
+                         WHEN s.ac_bas_bse_amt    IS NULL
+                           OR s.ac_verif_ind_flag = pg_flag_N_c
+                         THEN pg_flag_Y_c ELSE pg_flag_N_c
+                       END AS null_cost_flag,
+                       s.valn_appr_flag,
+                       s.ac_prin_cash_amt,
+                       s.ac_inc_cash_amt,
+                       s.ac_resv_cash_amt,
+                       s.ac_pend_cash_amt,
+                       s.creat_by,
+                       s.creat_tm,
+                       s.upd_by,
+                       s.upd_tm
+                     FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum s
+                     JOIN cmpnts c
+                       ON s.ac_sk = c.cmpnt_ac_sk
+                     WHERE s.valn_as_of_date = (
+                       SELECT COALESCE(
+                                MAX(valn_as_of_date),
+                                (SELECT npf_data_load_date FROM load_dates)
+                              )
+                         FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_POSN_SUM
+                        WHERE ac_sk = c.cmpnt_ac_sk
+                          AND valn_as_of_date >= (SELECT npf_data_load_date FROM load_dates)
+                     )
+                       AND (s.valn_freq_dcde, s.valn_run_time) = (
+                         -- grab the freq/run_time for that max date
+                         SELECT valn_freq_dcde, valn_run_time
+                           FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_POSN_SUM
+                          WHERE ac_sk = c.cmpnt_ac_sk
+                            AND valn_as_of_date = (
+                              SELECT COALESCE(
+                                       MAX(valn_as_of_date),
+                                       (SELECT npf_data_load_date FROM load_dates)
+                                     )
+                                FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_POSN_SUM
+                               WHERE ac_sk = c.cmpnt_ac_sk
+                                 AND valn_as_of_date >= (SELECT npf_data_load_date FROM load_dates)
+                            )
+                          LIMIT 1
+                       )
+                   ),
+                   summed AS (
+                     SELECT
+                       SUM(ac_accr_inc_bse_amt) AS ac_accr_inc_bse_amt,
+                       SUM(ac_accr_exp_bse_amt) AS ac_accr_exp_bse_amt,
+                       SUM(ac_mv_bse_amt)       AS ac_mv_bse_amt,
+                       SUM(ac_bas_bse_amt)      AS ac_bas_bse_amt,
+                       SUM(ac_prin_cash_amt)    AS ac_prin_cash_amt,
+                       SUM(ac_inc_cash_amt)     AS ac_inc_cash_amt,
+                       SUM(ac_resv_cash_amt)    AS ac_resv_cash_amt,
+                       SUM(ac_pend_cash_amt)    AS ac_pend_cash_amt
+                     FROM cmpnt_vals
+                   )
+
+                   -- 12.d) final shape: exactly the same columns your ref-cursor returned
+                   SELECT
+                     fd.ac_sk                                      AS ac_sk,
+                     -- carry through the same “latest” date/freq/run_time
+                     (SELECT valn_as_of_date FROM cmpnt_vals FETCH FIRST ROW)  AS valn_as_of_date,
+                     (SELECT valn_freq_dcde    FROM cmpnt_vals FETCH FIRST ROW)  AS valn_freq_dcde,
+                     (SELECT valn_run_time     FROM cmpnt_vals FETCH FIRST ROW)  AS valn_run_time,
+
+                     -- aggregated sums
+                     summed.ac_accr_inc_bse_amt AS ac_accr_inc_bse_amt,
+                     summed.ac_accr_exp_bse_amt AS ac_accr_exp_bse_amt,
+                     summed.ac_mv_bse_amt       AS ac_mv_bse_amt,
+                     summed.ac_bas_bse_amt      AS ac_bas_bse_amt,
+
+                     -- null_cost_flag computed once more on the SUM
+                     CASE
+                       WHEN summed.ac_bas_bse_amt IS NULL
+                         OR (SELECT null_cost_flag FROM cmpnt_vals FETCH FIRST ROW) = pg_flag_N_c
+                       THEN pg_flag_Y_c ELSE pg_flag_N_c
+                     END AS null_cost_flag,
+
+                     -- use ANY_VALUE/MAX to pick one valn_appr_flag
+                     ANY_VALUE(cmpnt_vals.valn_appr_flag)  AS valn_appr_flag,
+
+                     -- and the cash amounts
+                     summed.ac_prin_cash_amt  AS ac_prin_cash_amt,
+                     summed.ac_inc_cash_amt   AS ac_inc_cash_amt,
+                     summed.ac_resv_cash_amt  AS ac_resv_cash_amt,
+                     summed.ac_pend_cash_amt  AS ac_pend_cash_amt,
+
+                     -- pick one audit stamp
+                     ANY_VALUE(cmpnt_vals.creat_by) AS creat_by,
+                     ANY_VALUE(cmpnt_vals.creat_tm) AS creat_tm,
+                     ANY_VALUE(cmpnt_vals.upd_by)   AS upd_by,
+                     ANY_VALUE(cmpnt_vals.upd_tm)   AS upd_tm
+                   FROM fd
+                   CROSS JOIN summed
                  )
 
                /* –– Banking Deposit Balances –– */
