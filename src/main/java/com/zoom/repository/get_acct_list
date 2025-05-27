@@ -1,15 +1,28 @@
 WITH
   user_info AS (
-    SELECT user_sk
-      FROM npf_user
-     WHERE login_id = :p_login_id
+    SELECT 
+      user_sk,
+      user_type_dode
+    FROM npf_user
+    WHERE login_id = :p_login_id
   ),
 
   user_mod AS (
     SELECT
-      npf_security_pkg.get_generic_id(user_sk, :p_cust_sk) AS user_sk_mod
-    FROM user_info
+      CASE 
+        WHEN ui.user_type_dode = 'IN' THEN (
+          SELECT usr.user_sk
+          FROM npf_user usr
+          JOIN npf_customer cust ON cust.cust_sk = :p_cust_sk
+          WHERE usr.user_type_dode = 'G1'
+          AND usr.login_id LIKE cust.spnsr_code || '%'
+          AND ROWNUM = 1
+        )
+        ELSE ui.user_sk
+      END AS user_sk_mod
+    FROM user_info ui
   ),
+
   acu AS (
     SELECT
       xref.cust_sk,
@@ -26,6 +39,7 @@ WITH
     WHERE xref.cust_sk     = :p_cust_sk
       AND ac.ac_stat_dcde <> 'CLOSED'
   ),
+
   dc_ac AS (
     SELECT
       CASE
@@ -74,6 +88,7 @@ WITH
       END
     ) = 'y'
   ),
+
   partner_ac AS (
     SELECT
       acu.ac_sk,
@@ -86,11 +101,13 @@ WITH
       ON prtnr.prtnr_prtnr_sk = prtnr_ac.prtnr_prtnr_sk
     WHERE acu.data_src_id = 12
   ),
+
   all_ac AS (
     SELECT ac_sk, ac_id, ac_desc FROM dc_ac
     UNION ALL
     SELECT ac_sk, ac_id, ac_desc FROM partner_ac
   )
+
 SELECT
   a.ac_sk,
   a.ac_id,
@@ -104,7 +121,7 @@ SELECT
       WHEN :p_attrb_hdr_seq = 5 THEN s.attrb_id_5
       ELSE NULL
     END,
-    $p_attrb_hdr_seq
+    :p_attrb_hdr_seq
   ) AS attrb_id,
   COALESCE(
     CASE
@@ -121,5 +138,4 @@ FROM all_ac AS a
 LEFT JOIN wpa_ac_attrib_set AS s
   ON s.cust_sk = :p_cust_sk
  AND s.ac_sk   = a.ac_sk
-ORDER BY a.ac_id
-;
+ORDER BY a.ac_id;
