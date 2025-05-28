@@ -326,6 +326,7 @@ WITH
     ) nt
     WHERE fd.ac_type_grp_dcde IN ('BRK','IMA','ITR','MMD','RTR','SEC')
     UNION ALL
+    -- zero‐row fallback
     SELECT
       fd.ac_sk                AS ac_sk,
       fd.begin_date_c         AS valn_as_of_date,
@@ -461,6 +462,7 @@ WITH
     ) mf_types
     WHERE fd.ac_type_grp_dcde = 'MUT'
     UNION ALL
+    -- zero‐row fallback
     SELECT
       fd.ac_sk           AS ac_sk,
       fd.begin_date_c    AS valn_as_of_date,
@@ -622,6 +624,7 @@ WITH
     ) ptr_types
     WHERE fd.ac_type_grp_dcde = 'PTR'
     UNION ALL
+    -- zero‐row fallback
     SELECT
       fd.ac_sk,
       fd.begin_date_c     AS valn_as_of_date,
@@ -687,7 +690,7 @@ WITH
       a.upd_by,
       a.upd_tm,
       yo_types.ac_type_grp_dcde,
-      yo_types.dtl_ac_type
+      yo_types.dtl_ac_type,
       NULL AS rwd_curr_bal_desc
 
     FROM final_dates fd
@@ -707,6 +710,7 @@ WITH
     ) yo_types
     WHERE fd.ac_type_grp_dcde IN ('YIN','YLN','YRW')
     UNION ALL
+    -- zero‐row fallback
     SELECT
       fd.ac_sk,
       fd.begin_date_c     AS valn_as_of_date,
@@ -725,8 +729,7 @@ WITH
       NULL                AS creat_by,
       NULL                AS creat_tm,
       NULL                AS upd_by,
-      NULL                AS upd_tm,
-      NULL AS rwd_curr_bal_desc,
+      NULL                AS upd_tm
       yo_types.ac_type_grp_dcde,
       yo_types.dtl_ac_type
     FROM final_dates fd
@@ -783,6 +786,7 @@ WITH
        WHERE ac.ac_sk = fd.ac_sk
     ) fb_types
     UNION ALL
+    -- zero‐row fallback
     SELECT
       fd.ac_sk,
       fd.begin_date_c     AS valn_as_of_date,
@@ -1021,7 +1025,7 @@ SELECT
   fd.ac_sk,
   fd.cust_sk,
   fd.user_sk,
-  fd.ac_type_grp_dcde
+  fd.ac_type_grp_dcde,
   fd.i_tx,
   fd.dsclmr_desc,
   fd.begin_date_c,
