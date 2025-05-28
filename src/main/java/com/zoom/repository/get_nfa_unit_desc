@@ -1,0 +1,8 @@
+SELECT (
+    SELECT dx.parm_1
+    FROM npf_data_xref dx
+    WHERE dx.xref_type = pg_xref_type_c
+      AND dx.xref_val = get_ast_iss_type(ac.ac_sk)
+    LIMIT 1
+) AS nfa_unit_desc
+FROM npf_account ac;
