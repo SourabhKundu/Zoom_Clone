@@ -1,0 +1,1318 @@
+Functions used in get_account_profile_details procedure 
+
+get_account_dtls --> Its a procedure calling internally in this procedure
+get_data_load_date  --> Its a procedure calling internally in this procedure
+npf_valn_mgr --> Its a proc 
+parms2string
+rec_stop
+getBankingDepositBals[Have 2 functions with getBankingDepositBals]
+getNonBankingBals 
+getBankingLoanBals
+getMutualFundBals
+getManualAggregatedBals
+getPTRAccountBals
+getYodleeAggregatedBals
+
+--------------------------------------------------------------------------------------------------------------------
+
+PROCEDURE npf_valn_mgr(
+                       p_ac_sk_a IN NPF_ACCOUNT.ac_sk%TYPE,
+                       p_begin_date_c IN VARCHAR2,
+                       p_end_date_c IN VARCHAR2 DEFAULT 'NA',
+                       po_valn_freq_dcde_a OUT NPF_AC_POSN_SUM.valn_freq_dcde%TYPE,
+                       po_begin_valn_run_time_a OUT NPF_AC_POSN_SUM.valn_run_time%TYPE,
+                       po_end_valn_run_time_a OUT NPF_AC_POSN_SUM.valn_run_time%TYPE
+                      )
+
+AS
+
+/* Local Variables used for calculation inside this procedure                      */
+v_As_of_date DATE;
+v_From_date DATE;
+v_Thru_date DATE;
+v_LBDOM_date DATE;
+v_FBDOM_date DATE;
+v_Caln_date DATE;
+v_day_c VARCHAR2(10);
+
+/* Variables used for error-handling                                               */
+/* Procedures parameters when the error occourred                                  */
+v_parms_c VARCHAR2 (4000);
+/* Exception location procedure/function name                                      */
+v_procedure_name_c VARCHAR2(400);
+/* This variable tracks the location within this procedure.                        */
+v_location_i INTEGER;
+
+/* Cursor for retrieving valn_freq_dcde and valn_run_time for
+   monthly booked and daily informational data                                     */
+CURSOR get_valn_cursor(
+                       p_ac_sk_a IN NPF_ACCOUNT.AC_SK%TYPE,
+                       p_as_of_date IN DATE
+                      )
+IS
+
+    SELECT
+        MAX(valn_run_time) v_valn_run_time,valn_freq_dcde,valn_appr_flag
+    FROM
+        NPF_AC_POSN_SUM
+    WHERE
+--        TO_CHAR(valn_as_of_date,pg_std_date_format_c) =
+--        TO_CHAR(p_as_of_date,pg_std_date_format_c)
+        -- Trunc Changes for I20088
+        valn_as_of_date BETWEEN TRUNC(p_as_of_date) and TRUNC(p_as_of_date) + 86399/86400	-- PG73 I20088
+    AND
+        ac_sk = p_ac_sk_a
+    GROUP BY
+        valn_freq_dcde,valn_appr_flag
+    ORDER BY
+        valn_freq_dcde DESC,valn_appr_flag DESC;
+
+
+/* Executable section for npf_valn_mgr                                             */
+BEGIN
+
+/* Initialization of variables for error-handling                                  */
+    v_parms_c := NULL;
+    v_location_i := 1;
+    v_procedure_name_c := 'npf_valn_mgr';
+
+    IF (p_end_date_c = pg_not_applicable_c) THEN
+/* Logic for positional reports                                                    */
+/* Call to date cal. manager to calculate current business day                     */
+        npf_date_cal_mgr(
+                         p_begin_date_c,pg_curr_buss_day_c,
+                         v_As_of_date,v_Caln_date
+                        );
+
+/* Calculation of valuation run time                                               */
+        FOR v_valn_cur IN get_valn_cursor(p_ac_sk_a,v_As_of_date)
+        LOOP
+
+            po_valn_freq_dcde_a := v_valn_cur.valn_freq_dcde;
+            po_begin_valn_run_time_a := v_valn_cur.v_valn_run_time;
+            EXIT;
+
+        END LOOP;
+
+        v_location_i := 10;
+
+/* If data is not present in table for given inputs then calculate valn_freq_dcde
+   separately by comparing As of date with Last Business day of month              */
+        IF (po_valn_freq_dcde_a IS NULL) THEN
+
+            npf_date_cal_mgr (
+                              p_begin_date_c, pg_last_busn_day_of_mth_c,
+                              v_LBDOM_date,v_Caln_date
+                             );
+
+            v_location_i := 20;
+
+/* Determine valn_freq_dcde by comparing As_of_date with LBDOM                     */
+            IF (TO_CHAR(v_As_of_date,pg_std_date_format_c) =
+                 TO_CHAR(v_LBDOM_date,pg_std_date_format_c)) THEN
+                po_valn_freq_dcde_a := pg_flag_mth_booked_c;
+
+            ELSE
+                po_valn_freq_dcde_a := pg_flag_dly_info_c;
+
+            END IF;
+
+        END IF;
+
+        v_location_i := 30;
+
+    ELSE
+/* Valuation logic for transactional reports                                       */
+/* Call to date validation manager to validate the date and
+   store it in v_From_date and v_Thru_date                                         */
+        npf_date_val_mgr(
+                         p_begin_date_c,p_end_date_c,v_From_date,v_Thru_date
+                        );
+
+/* Get first date of month by calling date calculation manager                     */
+        npf_date_cal_mgr(
+                         p_begin_date_c,pg_first_busn_day_of_mth_c,
+                         v_FBDOM_date,v_Caln_date
+                        );
+
+        v_location_i := 40;
+
+/* Calculation of valuation frequency decode                                       */
+        IF (TO_CHAR(v_From_date) = TO_CHAR(v_Caln_date)) THEN
+            po_valn_freq_dcde_a := pg_flag_mth_booked_c;
+
+        ELSE
+            po_valn_freq_dcde_a := pg_flag_dly_info_c;
+
+        END IF;
+
+        v_location_i := 50;
+
+        v_From_date := v_From_date - 1;
+
+/* Retrieve valn_run_time for Begin date                                           */
+        FOR v_valn_cur IN get_valn_cursor(p_ac_sk_a,v_From_date)
+        LOOP
+
+            po_begin_valn_run_time_a := v_valn_cur.v_valn_run_time;
+            EXIT;
+
+        END LOOP;
+
+/* If no data for valn_run_time for begin date then put it same as begin date      */
+        po_begin_valn_run_time_a := NVL(po_begin_valn_run_time_a,v_From_date);
+
+/* Retrieve valn_run_time for End date                                             */
+        FOR v_valn_cur IN get_valn_cursor(p_ac_sk_a,v_Thru_date)
+        LOOP
+
+            po_end_valn_run_time_a := v_valn_cur.v_valn_run_time;
+            EXIT;
+
+        END LOOP;
+
+/* If no data for valn_run_time for begin date then put it same as begin date      */
+        po_end_valn_run_time_a := NVL(po_end_valn_run_time_a,v_Thru_date);
+
+    END IF;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        npf_err_pkg.parms2string (v_parms_c,'p_ac_sk_a',p_ac_sk_a );
+        npf_err_pkg.parms2string (v_parms_c,'p_begin_date_c',p_begin_date_c);
+        npf_err_pkg.parms2string (v_parms_c,'p_end_date_c',p_end_date_c);
+        npf_err_pkg.rec_stop(SQLCODE,pg_err_type_c,SQLERRM,v_parms_c,
+                             v_location_i,pg_package_c,v_procedure_name_c);
+
+END npf_valn_mgr;
+
+---------------------------------------------------------------------------------------------------------------------------
+
+ PROCEDURE parms2string(po_accumulator_c IN OUT nocopy varchar2,
+                         p_parm_name_c    IN            varchar2,
+                         p_parm_value_c   IN            varchar2) is
+
+    v_procedure_c constant varchar2(30) := 'parms2string';
+
+    v_location_i integer;
+
+  BEGIN
+
+    v_location_i := 1000;
+
+    if ( po_accumulator_c is not NULL ) then
+        po_accumulator_c := substr(po_accumulator_c||chr(10), 1, 4000);
+    end if;
+
+    v_location_i := 2000;
+
+    po_accumulator_c := substr(po_accumulator_c||
+                                 p_parm_name_c||
+                                 '="'||
+                                 p_parm_value_c||
+                                 '"', 1, 4000);
+
+  /*EXCEPTION
+    when OTHERS then
+      raise_application_error(SQLCODE, SQLERRM);
+  */
+  END parms2string;
+  
+  ----------------------------------------------------------------------------------------------------------------------
+  
+  PROCEDURE rec_stop (p_err_in      IN INTEGER  := SQLCODE,
+                      p_err_type_in IN VARCHAR2 := 'ORACLE',
+                      p_msg_in      IN VARCHAR2 := NULL,
+                      p_parms_in    IN VARCHAR2 := NULL,
+                      p_loc_in      IN INTEGER  := NULL,
+                      p_pkg_in      IN VARCHAR2 := NULL,
+                      p_proc_in     IN VARCHAR2 := NULL) IS
+
+  BEGIN
+
+    -- Record the exception and move on
+    rec_go (p_err_in,
+            p_err_type_in,
+            p_msg_in,
+            p_parms_in,
+            p_loc_in,
+            p_pkg_in,
+            p_proc_in);
+
+    -- Raise the exception to the calling application
+    raise_err (p_err_in,
+               p_err_type_in);
+
+/* commented out 05/06/2005 - MMJ
+  EXCEPTION
+    when others then
+      raise_application_error(sqlcode, sqlerrm);
+*/
+  END rec_stop;
+  
+  ----------------------------------------------------------------------------------------------------------------
+  
+  FUNCTION getBankingDepositBals(p_ac_sk 		IN npf_account.ac_sk%TYPE,
+                               p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                               p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE
+			      )  RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getBankingDepositBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+    ------I17110-----------
+    v_rec_count INTEGER;
+
+     --JS442 account activity Changes
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+    v_location_i := 1100;
+      select count(*) into v_rec_count --- No. of records with valuation as of date = max valuation date
+                    from npf_ac_deposit
+                    where AC_SK = p_ac_sk
+                    and valn_as_of_date
+                    BETWEEN p_max_valn_date and p_data_load_date;
+
+  --JS442 account activity Changes
+     SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+    IF ((p_max_valn_date is NOT NULL) and (v_rec_count > 0)) --- If record exists return the valuation corresponding to max_valn_date.
+    THEN
+    v_location_i := 1110;
+    OPEN v_cur_out FOR
+
+    	SELECT 	ac_sk,
+		deposit_id,
+		mv_bse_amt,
+		cur_ldgr_bal_amt,
+		cur_avail_bal_amt,
+		close_ldgr_bal_amt,
+		pra_avail_amt,
+		pra_used_amt,
+		pra_cr_lim_amt,
+		cur_rt_amt,
+		apy_rt_amt,
+		apy_rt_lst_per_amt,
+		int_pd_ytd_amt,
+		txw_ytd_amt,
+		cur_ldgr_bal_inv_amt,
+		cur_avail_bal_inv_amt,
+		close_ldgr_bal_inv_amt,
+		cur_ldgr_bal_comb_amt,
+		cur_avail_bal_comb_amt,
+		close_ldgr_bal_comb_amt,
+		npf_util_pkg.get_dcde_desc('TERMCD',term_cd_dcde) term_cd_dcde,
+		term_cd_qty_nbr,
+		matur_cde_date,
+		lst_int_pmt_amt,
+		cd_int_pmt_meth_dcde,
+		creat_by,
+		creat_tm,
+		upd_by,
+		upd_tm,
+		valn_as_of_date,
+		(select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde,  --JS442 account activity Changes
+    	(select v_dtl_ac_type from dual) as dtl_ac_type --JS442 account activity Changes
+    	FROM npf_ac_deposit
+	    WHERE 	AC_SK = p_ac_sk
+        and valn_as_of_date = (select max(valn_as_of_date) from npf_ac_deposit  --By RR111/ for 17110----
+                                where ac_sk = p_ac_sk and valn_as_of_date
+                                BETWEEN p_max_valn_date and p_data_load_date)
+	    ORDER BY DEPOSIT_ID;
+
+    ELSE   ---- If record doesn't exist return 0 values with as of date = data load date.
+    v_location_i := 1120;
+    OPEN v_cur_out FOR
+    	SELECT
+        p_ac_sk AS ac_sk,
+		null deposit_id,
+		0 mv_bse_amt,
+		0 cur_ldgr_bal_amt,
+		0 cur_avail_bal_amt,
+		0 close_ldgr_bal_amt,
+		0 pra_avail_amt,
+		0 pra_used_amt,
+		0 pra_cr_lim_amt,
+		0 cur_rt_amt,
+		0 apy_rt_amt,
+		0 apy_rt_lst_per_amt,
+		0 int_pd_ytd_amt,
+		0 txw_ytd_amt,
+		0 cur_ldgr_bal_inv_amt,
+		0 cur_avail_bal_inv_amt,
+		0 close_ldgr_bal_inv_amt,
+		0 cur_ldgr_bal_comb_amt,
+		0 cur_avail_bal_comb_amt,
+		0 close_ldgr_bal_comb_amt,
+		null term_cd_dcde,
+		null  term_cd_qty_nbr,
+		null matur_cde_date,
+		0 lst_int_pmt_amt,
+		null cd_int_pmt_meth_dcde,
+		null creat_by,
+		null creat_tm,
+		null upd_by,
+		null upd_tm,
+		p_data_load_date AS valn_as_of_date,
+		v_ac_type_grp_dcde as ac_type_grp_dcde, --JS442 Mobile Account Activity Change
+    	v_dtl_ac_type as dtl_ac_type  --JS442 Mobile Account Activity Change
+    	FROM DUAL;
+END IF;
+--------By RR111/for 17110-------------
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getBankingDepositBals;
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+
+  FUNCTION getBankingDepositBals(p_ac_sk 		IN npf_account.ac_sk%TYPE,
+                               p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                               p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE
+			      )  RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getBankingDepositBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+    ------I17110-----------
+    v_rec_count INTEGER;
+
+     --JS442 account activity Changes
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+    v_location_i := 1100;
+      select count(*) into v_rec_count --- No. of records with valuation as of date = max valuation date
+                    from npf_ac_deposit
+                    where AC_SK = p_ac_sk
+                    and valn_as_of_date
+                    BETWEEN p_max_valn_date and p_data_load_date;
+
+  --JS442 account activity Changes
+     SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+    IF ((p_max_valn_date is NOT NULL) and (v_rec_count > 0)) --- If record exists return the valuation corresponding to max_valn_date.
+    THEN
+    v_location_i := 1110;
+    OPEN v_cur_out FOR
+
+    	SELECT 	ac_sk,
+		deposit_id,
+		mv_bse_amt,
+		cur_ldgr_bal_amt,
+		cur_avail_bal_amt,
+		close_ldgr_bal_amt,
+		pra_avail_amt,
+		pra_used_amt,
+		pra_cr_lim_amt,
+		cur_rt_amt,
+		apy_rt_amt,
+		apy_rt_lst_per_amt,
+		int_pd_ytd_amt,
+		txw_ytd_amt,
+		cur_ldgr_bal_inv_amt,
+		cur_avail_bal_inv_amt,
+		close_ldgr_bal_inv_amt,
+		cur_ldgr_bal_comb_amt,
+		cur_avail_bal_comb_amt,
+		close_ldgr_bal_comb_amt,
+		npf_util_pkg.get_dcde_desc('TERMCD',term_cd_dcde) term_cd_dcde,
+		term_cd_qty_nbr,
+		matur_cde_date,
+		lst_int_pmt_amt,
+		cd_int_pmt_meth_dcde,
+		creat_by,
+		creat_tm,
+		upd_by,
+		upd_tm,
+		valn_as_of_date,
+		(select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde,  --JS442 account activity Changes
+    	(select v_dtl_ac_type from dual) as dtl_ac_type --JS442 account activity Changes
+    	FROM npf_ac_deposit
+	    WHERE 	AC_SK = p_ac_sk
+        and valn_as_of_date = (select max(valn_as_of_date) from npf_ac_deposit  --By RR111/ for 17110----
+                                where ac_sk = p_ac_sk and valn_as_of_date
+                                BETWEEN p_max_valn_date and p_data_load_date)
+	    ORDER BY DEPOSIT_ID;
+
+    ELSE   ---- If record doesn't exist return 0 values with as of date = data load date.
+    v_location_i := 1120;
+    OPEN v_cur_out FOR
+    	SELECT
+        p_ac_sk AS ac_sk,
+		null deposit_id,
+		0 mv_bse_amt,
+		0 cur_ldgr_bal_amt,
+		0 cur_avail_bal_amt,
+		0 close_ldgr_bal_amt,
+		0 pra_avail_amt,
+		0 pra_used_amt,
+		0 pra_cr_lim_amt,
+		0 cur_rt_amt,
+		0 apy_rt_amt,
+		0 apy_rt_lst_per_amt,
+		0 int_pd_ytd_amt,
+		0 txw_ytd_amt,
+		0 cur_ldgr_bal_inv_amt,
+		0 cur_avail_bal_inv_amt,
+		0 close_ldgr_bal_inv_amt,
+		0 cur_ldgr_bal_comb_amt,
+		0 cur_avail_bal_comb_amt,
+		0 close_ldgr_bal_comb_amt,
+		null term_cd_dcde,
+		null  term_cd_qty_nbr,
+		null matur_cde_date,
+		0 lst_int_pmt_amt,
+		null cd_int_pmt_meth_dcde,
+		null creat_by,
+		null creat_tm,
+		null upd_by,
+		null upd_tm,
+		p_data_load_date AS valn_as_of_date,
+		v_ac_type_grp_dcde as ac_type_grp_dcde, --JS442 Mobile Account Activity Change
+    	v_dtl_ac_type as dtl_ac_type  --JS442 Mobile Account Activity Change
+    	FROM DUAL;
+END IF;
+--------By RR111/for 17110-------------
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getBankingDepositBals;
+  
+  ---------------------------------------------------------------------------------------------------------------
+  
+  
+FUNCTION getNonBankingBals(p_ac_sk 		IN npf_account.ac_sk%TYPE,
+                           p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                           p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE,
+                           p_valn_freq_decode IN npf_ac_posn_sum.valn_freq_dcde%TYPE,
+                           p_valn_run_time IN npf_ac_posn_sum.valn_run_time%TYPE
+			      )  RETURN SYS_REFCURSOR
+ IS
+
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getNonBankingBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+
+    --JS442 account activity Changes
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+
+	   v_location_i := 1100;
+	  --JS442 account activity Changes
+     SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+
+    v_location_i := 1200;
+    IF ((p_max_valn_date is NOT NULL) and (p_valn_freq_decode is NOT NULL) and (p_valn_run_time is NOT NULL)) -- If record exists return valuation corresponding to max_valn_date.
+    THEN
+    OPEN v_cur_out FOR
+                    SELECT
+    				ac_sk,
+					valn_as_of_date,
+					valn_freq_dcde,
+					valn_run_time,
+					ac_accr_inc_bse_amt,
+					ac_accr_exp_bse_amt,
+					ac_mv_bse_amt,
+					ac_bas_bse_amt,
+                    			CASE WHEN (ac_bas_bse_amt IS NULL OR ac_verif_ind_flag =pg_flag_N_c) THEN pg_flag_Y_c ELSE pg_flag_N_c END as null_cost_flag, --D17569 - ps145
+					valn_appr_flag,
+					ac_prin_cash_amt,
+					ac_inc_cash_amt,
+					ac_resv_cash_amt,
+					ac_pend_cash_amt,
+					creat_by,
+					creat_tm,
+					upd_by,
+					upd_tm,
+					(select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde,  --JS442 account activity Changes
+    				(select v_dtl_ac_type from dual) as dtl_ac_type --JS442 account activity Changes
+    				FROM npf_ac_posn_sum
+				WHERE 	AC_SK = p_ac_sk
+				AND     VALN_AS_OF_DATE = p_max_valn_date
+				AND    valn_freq_dcde = p_valn_freq_decode
+				AND     valn_run_time =  p_valn_run_time;
+
+    ELSE     ----- If record doesn't exist return 0 values with as of date = data load date.
+    v_location_i := 1250;
+    OPEN v_cur_out FOR
+                    SELECT
+    				p_ac_sk AS ac_sk,
+					p_data_load_date AS valn_as_of_date,
+					null valn_freq_dcde,
+					null valn_run_time,
+					0 ac_accr_inc_bse_amt,
+					0 ac_accr_exp_bse_amt,
+					0 ac_mv_bse_amt,
+					0 ac_bas_bse_amt,
+                    			null null_cost_flag, -- D17569 PS145
+					null valn_appr_flag,
+					0 ac_prin_cash_amt,
+					0 ac_inc_cash_amt,
+					0 ac_resv_cash_amt,
+					0 ac_pend_cash_amt,
+					null creat_by,
+					null creat_tm,
+					null upd_by,
+					null upd_tm,
+					v_ac_type_grp_dcde as ac_type_grp_dcde, --JS442 Mobile Account Activity Change
+    				v_dtl_ac_type as dtl_ac_type  --JS442 Mobile Account Activity Change
+                    FROM DUAL;
+
+END IF;
+--------By RR111/for 17110-------------
+    RETURN v_cur_out;
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getNonBankingBals;
+  
+  ------------------------------------------------------------------------------------------------------
+  
+  FUNCTION getBankingLoanBals(p_ac_sk 		IN npf_account.ac_sk%TYPE,
+                            p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                            p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE
+			      )  RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getBankingLoanBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+    --------I17110----------
+    v_rec_count INTEGER;
+
+    --JS442 MOBILE Account activity change
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+
+  BEGIN
+    v_location_i := 1000;
+    select count(*) into v_rec_count -- No. of records with valuation as of date = max valuation date
+                    FROM npf_ac_loan a
+	                WHERE 	a.AC_SK = p_ac_sk
+                    AND    a.loan_ac_num_id IN ( SELECT DISTINCT loan_ac_num_id
+					                                    FROM npf_ac_loan
+					                                    WHERE ac_sk = a.ac_sk )
+                    AND    a.loan_num_id  IN ( SELECT DISTINCT loan_num_id
+                                                        FROM npf_ac_loan
+                                                        WHERE ac_sk = a.ac_sk
+                                                        AND loan_ac_num_id = a.loan_ac_num_id )
+                    AND    a.valn_as_of_date = p_max_valn_date;
+
+                    --JS442 mobile account activity change
+     SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+   IF ((p_max_valn_date is NOT NULL) and (v_rec_count > 0 )) -- If record exists return the valuation corresponding to max_valn_date.
+    THEN
+    v_location_i := 1010;
+    OPEN v_cur_out FOR
+    	SELECT
+        a.ac_sk,
+		a.loan_ac_num_id,
+		a.mv_bse_amt,
+		a.loan_num_id,
+		a.commt_num_id,
+		a.pmt_due_date,
+		a.pmt_due_amount,
+		a.apr_rt_amt,
+		a.payoff_amt,
+		a.cr_lim_amt,
+		a.orig_instl_loan_amt,
+		a.avail_cr_amt,
+		a.escrow_amt,
+		NVL(a.prin_amt,0) + NVL(a.int_amt,0) + NVL(a.escrow_amt,0) prin_int_amt ,                              --sp103 , 23-Sep-2008 Loan Amt Breakout Changes
+		a.pmi_amt,
+		a.creat_by,
+		a.creat_tm,
+		a.upd_by,
+		a.upd_tm,
+		a.valn_as_of_date,
+        -- New Columns Retrieved for Custom Loan Changes
+        a.not_pd_amt,
+        a.int_accr_amt,
+        a.reprice_date,
+        a.commt_exp_date,
+        a.liab_amt,
+        a.matur_date,
+        a.ltr_cr_obligee,
+        (select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde, --JS442 mobile account activity change
+    	(select v_dtl_ac_type from dual) as dtl_ac_type --JS442 mobile account activity change
+    FROM npf_ac_loan a
+	WHERE 	a.AC_SK = p_ac_sk
+    AND    a.loan_ac_num_id IN ( SELECT DISTINCT loan_ac_num_id
+					             FROM npf_ac_loan
+					             WHERE ac_sk = a.ac_sk )
+    AND    a.loan_num_id  IN ( SELECT DISTINCT loan_num_id
+                               FROM npf_ac_loan
+                               WHERE ac_sk = a.ac_sk
+                               AND loan_ac_num_id = a.loan_ac_num_id )
+    AND    a.valn_as_of_date = p_max_valn_date
+ORDER BY a.commt_num_id,a.loan_num_id/*I18755 KV18*/,a.LOAN_AC_NUM_ID;--I16980 SS317
+
+  ELSE      ---- If record doesn't exist return 0 values with as of date = data load date
+    v_location_i := 1020;
+    OPEN v_cur_out FOR
+    	SELECT
+        p_ac_sk AS ac_sk,
+		null loan_ac_num_id,
+		0 mv_bse_amt,
+		null loan_num_id,
+		null commt_num_id,
+		null pmt_due_date,
+		0 pmt_due_amount,
+		0 apr_rt_amt,
+		0 payoff_amt,
+		0 cr_lim_amt,
+		0 orig_instl_loan_amt,
+		0 avail_cr_amt,
+		0 escrow_amt,
+		0 prin_int_amt ,
+		0 pmi_amt,
+		null creat_by,
+		null creat_tm,
+		null upd_by,
+		null upd_tm,
+		p_data_load_date AS valn_as_of_date,
+        -- New Columns Retrieved for Custom Loan Changes
+        0 not_pd_amt,
+        0 int_accr_amt,
+        null reprice_date,
+        null commt_exp_date,
+        0 liab_amt,
+        null matur_date,
+        null ltr_cr_obligee,
+		v_ac_type_grp_dcde as ac_type_grp_dcde,--JS442 Mobile Account Activity Change
+    	v_dtl_ac_type as dtl_ac_type --JS442 Mobile Account Activity Change
+    FROM DUAL;
+  END IF;
+
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getBankingLoanBals;
+
+----------------------------------------------------------------------------------------------------------------------------------------------
+
+FUNCTION getMutualFundBals(p_ac_sk 		IN npf_account.ac_sk%TYPE,
+                           p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                           p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE,
+                           p_valn_freq_decode IN npf_ac_posn_sum.valn_freq_dcde%TYPE,
+                           p_valn_run_time IN npf_ac_posn_sum.valn_run_time%TYPE
+			      )  RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getMutualFundBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+
+    --JS442 MOBILE Account activity change
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+
+	--JS442 MOBILE Account activity change
+	v_location_i := 2300;
+	SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+    v_location_i := 1300;
+    IF ((p_max_valn_date is NOT NULL) and (p_valn_freq_decode is NOT NULL) and (p_valn_run_time is NOT NULL)) -- If record exists return valuation corresponding to max_valn_date.
+    THEN
+    OPEN v_cur_out FOR
+                    SELECT
+                    position_sk,
+					ac_sk,
+					instr_id,
+				    valn_as_of_date,
+					valn_run_time,
+					valn_freq_dcde,
+					ldgr_id,
+					cash_dcde,
+					data_src_id,
+					adj_bas_bse_amt,
+                    			verif_ind_flag as null_cost_flag, -- D17569 ST111
+					adj_bas_lcl_amt,
+					mv_bse_amt,
+					mv_lcl_amt,
+					mkt_prc_lcl_amt,
+					exps_pybl_bse_amt,
+					exps_pybl_lcl_amt,
+					inc_rcvbl_bse_amt,
+					inc_rcvbl_lcl_amt,
+					unrl_mv_gnls_amt,
+					unrl_trans_gnls_amt,
+					unrl_tot_gnls_amt,
+					cntry_dcde,
+					curr_dcde,
+					shr_hld,
+					exch_rt_amt,
+					ast_iss_type,
+					ann_est_inc_amt,
+					orig_face_amt,
+					ror_cost_amt,
+					ror_mkt_amt,
+					mv_tot_flag,
+					gl_char_ac_id,
+					gl_ac_seq_nbr,
+					creat_by,
+					creat_tm,
+					upd_by,
+					upd_tm,
+					(select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde, --JS442 MOBILE Account activity change
+    				(select v_dtl_ac_type from dual) as dtl_ac_type --JS442 MOBILE Account activity change
+    				FROM npf_position
+				WHERE 	AC_SK = p_ac_sk
+				AND     VALN_AS_OF_DATE = p_max_valn_date
+				AND    valn_freq_dcde = p_valn_freq_decode
+				AND     valn_run_time =  p_valn_run_time;
+
+    else    ---- If record doesn't exist return 0 values with as of date = data load date.
+    v_location_i := 1350;
+    OPEN v_cur_out FOR
+                SELECT
+                    null position_sk,
+					p_ac_sk AS ac_sk,
+					null instr_id,
+					p_data_load_date AS valn_as_of_date,
+					null valn_run_time,
+					null valn_freq_dcde,
+					null ldgr_id,
+					null cash_dcde,
+					null data_src_id,
+					0 adj_bas_bse_amt,
+                    null null_cost_flag, -- D17569 ST111
+					0 adj_bas_lcl_amt,
+					0 mv_bse_amt,
+					0 mv_lcl_amt,
+					0 mkt_prc_lcl_amt,
+					0 exps_pybl_bse_amt,
+					0 exps_pybl_lcl_amt,
+					0 inc_rcvbl_bse_amt,
+					0 inc_rcvbl_lcl_amt,
+					0 unrl_mv_gnls_amt,
+					0 unrl_trans_gnls_amt,
+					0 unrl_tot_gnls_amt,
+					null cntry_dcde,
+					null curr_dcde,
+					null shr_hld,
+					0 exch_rt_amt,
+					null ast_iss_type,
+					0 ann_est_inc_amt,
+					0 orig_face_amt,
+					0 ror_cost_amt,
+					0 ror_mkt_amt,
+					null mv_tot_flag,
+					null gl_char_ac_id,
+					null gl_ac_seq_nbr,
+					null creat_by,
+					null creat_tm,
+					null upd_by,
+					null upd_tm,
+					v_ac_type_grp_dcde as ac_type_grp_dcde, --JS442 Mobile Account Activity Change
+    				v_dtl_ac_type as dtl_ac_type --JS442 Mobile Account Activity Change
+    				FROM DUAL;
+    END IF;
+
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getMutualFundBals;
+
+---------------------------------------------------------------------------------------------------------------------------------------
+
+
+FUNCTION getManualAggregatedBals(p_ac_sk 	IN npf_account.ac_sk%TYPE,
+                                p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                                p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE,
+                                p_valn_freq_decode IN npf_ac_posn_sum.valn_freq_dcde%TYPE,
+                                p_valn_run_time IN npf_ac_posn_sum.valn_run_time%TYPE
+				                )	RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getManualAggregatedBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+    v_rec_count INTEGER;
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+    v_location_i := 1200;
+
+    Select count(*) into v_rec_count FROM npf_ac_posn_sum posn_sum, --- Number of records
+                                            npf_ac_aggregation aggr
+   	                                    WHERE   aggr.ac_sk(+) = p_ac_sk
+                                        AND posn_sum.ac_sk(+) = aggr.ac_sk
+                                        AND posn_sum.valn_as_of_date(+) = p_max_valn_date
+   	                                    AND posn_sum.valn_freq_dcde(+) = p_valn_freq_decode
+                                        AND posn_sum.valn_run_time(+) =  p_valn_run_time;
+
+    SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+
+  IF ((v_rec_count > 0) and (p_max_valn_date is NOT NULL) and (p_valn_freq_decode is NOT NULL) and (p_valn_run_time is NOT NULL)) -- If record exists return valuation corresponding to max_valn_date.
+    THEN
+    OPEN v_cur_out FOR
+    SELECT
+   		posn_sum.ac_sk,
+		posn_sum.valn_as_of_date,
+		posn_sum.valn_freq_dcde,
+		posn_sum.valn_run_time,
+		posn_sum.ac_accr_inc_bse_amt,
+		posn_sum.ac_accr_exp_bse_amt,
+		posn_sum.ac_mv_bse_amt,
+		posn_sum.ac_bas_bse_amt,
+		posn_sum.valn_appr_flag,
+		posn_sum.ac_prin_cash_amt,
+		posn_sum.ac_inc_cash_amt,
+		posn_sum.ac_resv_cash_amt,
+		posn_sum.ac_pend_cash_amt,
+		posn_sum.creat_by,
+		posn_sum.creat_tm,
+		posn_sum.upd_by,
+		posn_sum.upd_tm,
+		aggr.lst_valn_date,
+		aggr.ast_acq_date,
+		aggr.aggr_ast_id,
+		aggr.ac_commt_amt,
+		aggr.ac_fund_amt,
+		aggr.tx_id,
+        (select sum(unrl_tot_gnls_amt)
+         from npf_position
+         where ac_sk = p_ac_sk
+         AND valn_as_of_date = posn_sum.valn_as_of_date
+         AND valn_freq_dcde = posn_sum.valn_freq_dcde
+         AND valn_run_time = posn_sum.valn_run_time) AS unrl_tot_gnls_amt,
+		(select LOGIN_ID
+			from npf_account npfac, npf_user npfuser
+			where npfac.ac_sk = p_ac_sk
+			and npfuser.user_sk = npfac.ac_creat_user_sk
+		)AS login_id,
+    (select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde,
+    (select v_dtl_ac_type from dual) as dtl_ac_type,
+	CASE WHEN (ac_bas_bse_amt IS NULL OR ac_verif_ind_flag = pg_flag_N_c) THEN pg_flag_Y_c ELSE pg_flag_N_c END as null_cost_flag --D17569 - ps145
+	FROM
+    npf_ac_posn_sum posn_sum,
+    npf_ac_aggregation aggr
+   	WHERE   aggr.ac_sk(+) = p_ac_sk
+    AND posn_sum.ac_sk(+) = aggr.ac_sk
+    AND posn_sum.valn_as_of_date(+) = p_max_valn_date
+   	AND posn_sum.valn_freq_dcde(+) = p_valn_freq_decode
+    AND posn_sum.valn_run_time(+) =  p_valn_run_time;
+
+  ELSE    ---- If record doesn't exist return 0 values with as of date = data load date.
+  v_location_i := 1250;
+  OPEN v_cur_out FOR
+    SELECT
+   		p_ac_sk AS ac_sk,
+		p_data_load_date AS valn_as_of_date,
+		null valn_freq_dcde,
+		null valn_run_time,
+		0 ac_accr_inc_bse_amt,
+		0 ac_accr_exp_bse_amt,
+		0 ac_mv_bse_amt,
+		0 ac_bas_bse_amt,
+		null valn_appr_flag,
+		0 ac_prin_cash_amt,
+		0 ac_inc_cash_amt,
+		0 ac_resv_cash_amt,
+		0 ac_pend_cash_amt,
+		null creat_by,
+		null creat_tm,
+		null upd_by,
+		null upd_tm,
+		null lst_valn_date,
+		null ast_acq_date,
+		null aggr_ast_id,
+		0 ac_commt_amt,
+		0 ac_fund_amt,
+		null tx_id,
+        	0 unrl_tot_gnls_amt,
+        	null login_id,
+    v_ac_type_grp_dcde as ac_type_grp_dcde,
+    v_dtl_ac_type as dtl_ac_type,
+        	null null_cost_flag -- D17569 PS145
+        from DUAL;
+   END IF;
+
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getManualAggregatedBals;
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+FUNCTION getPTRAccountBals(p_ac_sk 	IN npf_account.ac_sk%TYPE,
+                           p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                           p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE,
+                           p_valn_freq_decode IN npf_ac_posn_sum.valn_freq_dcde%TYPE,
+                           p_valn_run_time IN npf_ac_posn_sum.valn_run_time%TYPE
+				)	RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getPTRAccountBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+    v_rec_count INTEGER;
+	v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+
+    v_location_i := 1200;
+  select count(*) into v_rec_count FROM    npf_ac_posn_sum posn_sum, ------ Number of records
+			                                npf_ac_aggregation aggr,
+			                                NPF_MSTR_PRTNR prtnr,
+			                                NPF_MSTR_PRTNR_AC prtnr_ac
+	                                WHERE   aggr.ac_sk(+) = p_ac_sk
+                                    AND posn_sum.ac_sk(+) = aggr.ac_sk
+                                    AND posn_sum.valn_as_of_date(+) = p_max_valn_date
+	                                AND posn_sum.valn_freq_dcde(+) = p_valn_freq_decode
+                                    AND posn_sum.valn_run_time(+) = p_valn_run_time
+	                                AND prtnr_ac.prtnr_sk=prtnr.prtnr_sk
+                                    AND prtnr_ac.ac_sk=p_ac_sk;
+
+   SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+  IF ((v_rec_count > 0) and (p_max_valn_date is NOT NULL) and (p_valn_freq_decode is NOT NULL) and (p_valn_run_time is NOT NULL)) -- If record exists return valuation corresponding to max_valn_date.
+  THEN
+  OPEN v_cur_out FOR
+  SELECT
+		prtnr.prtnr_desc,
+   		posn_sum.ac_sk,
+		posn_sum.valn_as_of_date,
+		posn_sum.valn_freq_dcde,
+		posn_sum.valn_run_time,
+		posn_sum.ac_accr_inc_bse_amt,
+		posn_sum.ac_accr_exp_bse_amt,
+		posn_sum.ac_mv_bse_amt,
+		posn_sum.ac_bas_bse_amt,
+		posn_sum.valn_appr_flag,
+		posn_sum.ac_prin_cash_amt,
+		posn_sum.ac_inc_cash_amt,
+		posn_sum.ac_resv_cash_amt,
+		posn_sum.ac_pend_cash_amt,
+		posn_sum.creat_by,
+		posn_sum.creat_tm,
+		posn_sum.upd_by,
+		posn_sum.upd_tm,
+		aggr.lst_valn_date,
+		aggr.ast_acq_date,
+		aggr.aggr_ast_id,
+		aggr.ac_commt_amt,
+		aggr.ac_fund_amt,
+		aggr.tx_id,
+		(select LOGIN_ID
+			from npf_account npfac, npf_user npfuser
+			where npfac.ac_sk = p_ac_sk
+			and npfuser.user_sk = npfac.ac_creat_user_sk
+		)AS login_id,
+	(select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde,
+    (select v_dtl_ac_type from dual) as dtl_ac_type,
+	CASE WHEN (ac_verif_ind_flag =pg_flag_N_c) THEN pg_flag_Y_c ELSE pg_flag_N_c END as null_cost_flag --D17569 - ps145
+	FROM    npf_ac_posn_sum posn_sum,
+			npf_ac_aggregation aggr,
+			NPF_MSTR_PRTNR prtnr,
+			NPF_MSTR_PRTNR_AC prtnr_ac
+	WHERE   aggr.ac_sk(+) = p_ac_sk
+    AND posn_sum.ac_sk(+) = aggr.ac_sk
+    AND posn_sum.valn_as_of_date(+) = p_max_valn_date
+	AND posn_sum.valn_freq_dcde(+) = p_valn_freq_decode
+    AND posn_sum.valn_run_time(+) = p_valn_run_time
+	AND prtnr_ac.prtnr_sk=prtnr.prtnr_sk
+    AND prtnr_ac.ac_sk=p_ac_sk;
+
+  ELSE        ------ If record doesn't exist return 0 values with as of date = data load date.
+  OPEN v_cur_out FOR
+         SELECT
+		(select prtnr.prtnr_desc
+        from NPF_MSTR_PRTNR prtnr,
+        NPF_MSTR_PRTNR_AC prtnr_ac
+        where prtnr_ac.prtnr_sk=prtnr.prtnr_sk
+        AND prtnr_ac.ac_sk=p_ac_sk) AS prtnr_desc,
+   		p_ac_sk AS ac_sk,
+		p_data_load_date AS valn_as_of_date,
+		null valn_freq_dcde,
+		null valn_run_time,
+		0 ac_accr_inc_bse_amt,
+		0 ac_accr_exp_bse_amt,
+		0 ac_mv_bse_amt,
+		0 ac_bas_bse_amt,
+		null valn_appr_flag,
+		0 ac_prin_cash_amt,
+		0 ac_inc_cash_amt,
+		0 ac_resv_cash_amt,
+		0 ac_pend_cash_amt,
+		null creat_by,
+		null creat_tm,
+		null upd_by,
+		null upd_tm,
+		null lst_valn_date,
+		null ast_acq_date,
+		null aggr_ast_id,
+		0 ac_commt_amt,
+		0 ac_fund_amt,
+		null tx_id,
+        	null login_id,
+        v_ac_type_grp_dcde as ac_type_grp_dcde,
+    	v_dtl_ac_type as dtl_ac_type,
+        	null null_cost_flag -- D17569 PS145
+        from DUAL;
+
+  END IF;
+
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getPTRAccountBals;
+
+-------------------------------------------------------------------------------------------------------------------------------------
+
+FUNCTION getYodleeAggregatedBals(p_ac_sk 	IN npf_account.ac_sk%TYPE,
+                                    p_data_load_date IN npf_data_load_date.data_load_date%TYPE,
+                                    p_max_valn_date IN npf_ac_posn_sum.valn_as_of_date%TYPE,
+                                    p_valn_freq_decode IN npf_ac_posn_sum.valn_freq_dcde%TYPE,
+                                    p_valn_run_time IN npf_ac_posn_sum.valn_run_time%TYPE
+				)	RETURN SYS_REFCURSOR
+ IS
+    v_procedure_c CONSTANT VARCHAR2(30) := 'getYodleeAggregatedBals';
+    v_parms_c    VARCHAR2(4000);  -- This variable records the calling parameters for
+                                  -- debugging and error recording operations.
+    v_location_i INTEGER;  -- This variable tracks our location within this procedure.
+    v_cur_out SYS_REFCURSOR; -- the output cursor
+    v_nfa_unit_desc_a npf_data_xref.parm_1%TYPE;
+    v_rec_count INTEGER;
+
+    --JS442 mobile account activity change
+    v_ac_type_grp_dcde npf_dtl_ac_type.ac_type_grp_dcde%TYPE;
+    v_dtl_ac_type npf_dtl_ac_type.dtl_ac_type%TYPE;
+  BEGIN
+
+	v_location_i := 2300;
+	--JS442 mobile account activity change
+	    SELECT dtlAcTyp.ac_type_grp_dcde,dtlAcTyp.dtl_ac_type
+                        INTO   v_ac_type_grp_dcde,
+                               v_dtl_ac_type
+                        FROM   npf_account ac,
+                               npf_dtl_ac_type dtlAcTyp
+                        WHERE  ac.ac_sk       = p_ac_sk
+                        AND    ac.dtl_ac_type = dtlAcTyp.dtl_ac_type;
+
+    v_location_i := 1300;
+
+    -- Retrieving unit desc for NFA Accounts
+    IF ( is_nfa(p_ac_sk) ) THEN
+        v_nfa_unit_desc_a := get_nfa_unit_desc(p_ac_sk);
+    ELSE
+        v_nfa_unit_desc_a := NULL;
+    END IF;
+
+    select count(*) into v_rec_count FROM npf_ac_aggregation a, -- Number of records
+                                            npf_ac_posn_sum b
+			                        WHERE   a.ac_sk(+) = p_ac_sk
+			                        AND     b.ac_sk(+) = a.ac_sk
+			                        AND 	b.VALN_AS_OF_DATE(+) = p_max_valn_date
+			                        AND     b.valn_run_time(+) = p_valn_run_time
+			                        AND     b.valn_freq_dcde(+) = p_valn_freq_decode;
+
+    IF ((v_rec_count > 0) AND (p_max_valn_date is NOT NULL) and (p_valn_freq_decode is NOT NULL) and (p_valn_run_time is NOT NULL)) -- If record exists return valuation corresponding to max_valn_date.
+    THEN
+    OPEN v_cur_out FOR
+                SELECT
+                    a.ac_sk,
+		            a.lst_valn_date,
+                    a.aggr_ast_id,
+                    a.ac_commt_amt,
+                    a.ac_fund_amt,
+                    a.pmt_due_amt,
+                    a.pmt_due_date,
+                    a.curr_bal_amt,
+                    a.lst_pmt_amt,
+                    a.lst_pmt_date,
+                    a.avail_cr_amt,
+                    a.orig_loan_amt,
+                    a.orig_loan_date,
+                    v_nfa_unit_desc_a AS rwd_curr_bal_desc,
+					a.creat_by,
+					a.creat_tm,
+					a.upd_by,
+					a.upd_tm,
+                    b.valn_as_of_date,
+                    --SIR 11688
+                    a.apr_rt_amt,
+                    ROUND(a.avail_bal_amt,2) AS avail_bal_amt, -- is32
+                    ROUND(a.payoff_amt,2) AS payoff_amt,
+                    ROUND(b.ac_prin_cash_amt,2) AS ac_prin_cash_amt,
+                    (select v_ac_type_grp_dcde from dual) as ac_type_grp_dcde, --JS442 mobile account activity change
+    				(select v_dtl_ac_type from dual) as dtl_ac_type --JS442 mobile account activity change
+    		    FROM npf_ac_aggregation a,
+                        npf_ac_posn_sum b
+			    WHERE   a.ac_sk(+) = p_ac_sk
+			    AND     b.ac_sk(+) = a.ac_sk
+			    AND 	b.VALN_AS_OF_DATE(+) = p_max_valn_date
+			    AND     b.valn_run_time(+) = p_valn_run_time
+			    AND     b.valn_freq_dcde(+) = p_valn_freq_decode;
+
+    ELSE      ------ If record doesn't exist return 0 values with as of date = data load date.
+    OPEN v_cur_out FOR
+                SELECT
+                    p_ac_sk AS ac_sk,
+		            NULL lst_valn_date,
+                    NULL aggr_ast_id,
+                    0 ac_commt_amt,
+                    0 ac_fund_amt,
+                    0 pmt_due_amt,
+                    NULL pmt_due_date,
+                    0 curr_bal_amt,
+                    0 lst_pmt_amt,
+                    NULL lst_pmt_date,
+                    0 avail_cr_amt,
+                    0 orig_loan_amt,
+                    NULL orig_loan_date,
+                    v_nfa_unit_desc_a AS rwd_curr_bal_desc,
+					NULL creat_by,
+					NULL creat_tm,
+					NULL upd_by,
+					NULL upd_tm,
+                    p_data_load_date AS valn_as_of_date,
+                    --SIR 11688
+                    0 apr_rt_amt,
+                    0 avail_bal_amt, -- is32
+                    0 payoff_amt,
+                    0 ac_prin_cash_amt,
+                    v_ac_type_grp_dcde as ac_type_grp_dcde, --JS442 mobile account activity change
+    				v_dtl_ac_type as dtl_ac_type --JS442 mobile account activity change
+    		    FROM DUAL;
+
+    END IF;
+
+    RETURN v_cur_out;
+
+  EXCEPTION
+       WHEN OTHERS THEN
+           npf_err_pkg.parms2string(v_parms_c, 'p_ac_sk', p_ac_sk);
+           npf_err_pkg.rec_stop (SQLCODE,
+                                 'ORACLE',
+                                 NULL,
+                                 v_parms_c,
+                                 v_location_i,
+                                 pg_package_c,
+                                 v_procedure_c);
+  END getYodleeAggregatedBals;
