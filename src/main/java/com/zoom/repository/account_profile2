@@ -229,7 +229,7 @@ WITH
       ANY_VALUE(cmpnt_vals.creat_tm)          AS creat_tm,
       ANY_VALUE(cmpnt_vals.upd_by)            AS upd_by,
       ANY_VALUE(cmpnt_vals.upd_tm)            AS upd_tm,
-      fd.ac_type_grp_dcde,
+      fd.ac_type_grp_dcde
     FROM final_dates fd
     JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref dx
       ON dx.decoder_ac_sk = fd.ac_sk
@@ -326,7 +326,6 @@ WITH
     ) nt
     WHERE fd.ac_type_grp_dcde IN ('BRK','IMA','ITR','MMD','RTR','SEC')
     UNION ALL
-    -- zero‐row fallback
     SELECT
       fd.ac_sk                AS ac_sk,
       fd.begin_date_c         AS valn_as_of_date,
@@ -462,7 +461,6 @@ WITH
     ) mf_types
     WHERE fd.ac_type_grp_dcde = 'MUT'
     UNION ALL
-    -- zero‐row fallback
     SELECT
       fd.ac_sk           AS ac_sk,
       fd.begin_date_c    AS valn_as_of_date,
@@ -624,7 +622,6 @@ WITH
     ) ptr_types
     WHERE fd.ac_type_grp_dcde = 'PTR'
     UNION ALL
-    -- zero‐row fallback
     SELECT
       fd.ac_sk,
       fd.begin_date_c     AS valn_as_of_date,
@@ -690,8 +687,9 @@ WITH
       a.upd_by,
       a.upd_tm,
       yo_types.ac_type_grp_dcde,
-      yo_types.dtl_ac_type,
-      nfa_desc.rwd_curr_bal_desc
+      yo_types.dtl_ac_type
+      NULL AS rwd_curr_bal_desc
+
     FROM final_dates fd
     JOIN DEV_WPA_ACCOUNTS_DB.CORE.NPF_AC_AGGREGATION a
       ON a.ac_sk = fd.ac_sk
@@ -707,38 +705,8 @@ WITH
           ON ac.dtl_ac_type = dtl.dtl_ac_type
        WHERE ac.ac_sk = fd.ac_sk
     ) yo_types
-    LEFT JOIN LATERAL (
-  SELECT
-    CASE
-      WHEN EXISTS (
-        SELECT 1
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account a
-        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_xref b
-          ON b.parm_1 = a.data_src_id
-         AND b.parm_2 = a.dtl_ac_type
-         AND b.xref_type = 'pg_xref_nfa_c'
-        WHERE a.ac_sk = fd.ac_sk
-      )
-      THEN (
-        SELECT dx.parm_1
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_xref dx
-        WHERE dx.xref_type = 'pg_xref_type_c'
-          AND dx.xref_val = (
-            SELECT b.iss_type
-            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac a
-            JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset b
-              ON a.instr_id = b.instr_id
-            WHERE a.ac_sk = fd.ac_sk
-            LIMIT 1
-          )
-        LIMIT 1
-      )
-      ELSE NULL
-    END AS rwd_curr_bal_desc
-) nfa_desc
     WHERE fd.ac_type_grp_dcde IN ('YIN','YLN','YRW')
     UNION ALL
-    -- zero‐row fallback
     SELECT
       fd.ac_sk,
       fd.begin_date_c     AS valn_as_of_date,
@@ -748,7 +716,7 @@ WITH
       0                   AS ac_accr_exp_bse_amt,
       0                   AS ac_mv_bse_amt,
       0                   AS ac_bas_bse_amt,
-      pg_flag_Y_c         AS null_cost_flag,
+      'Y'         AS null_cost_flag,
       NULL                AS valn_appr_flag,
       0                   AS ac_prin_cash_amt,
       0                   AS ac_inc_cash_amt,
@@ -758,9 +726,9 @@ WITH
       NULL                AS creat_tm,
       NULL                AS upd_by,
       NULL                AS upd_tm,
+      NULL AS rwd_curr_bal_desc,
       yo_types.ac_type_grp_dcde,
-      yo_types.dtl_ac_type,
-      nfa_desc.rwd_curr_bal_desc
+      yo_types.dtl_ac_type
     FROM final_dates fd
     CROSS JOIN LATERAL (
       SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
@@ -769,35 +737,6 @@ WITH
           ON ac.dtl_ac_type = dtl.dtl_ac_type
        WHERE ac.ac_sk = fd.ac_sk
     ) yo_types
-    LEFT JOIN LATERAL (
-  SELECT
-    CASE
-      WHEN EXISTS (
-        SELECT 1
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account a
-        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_xref b
-          ON b.parm_1 = a.data_src_id
-         AND b.parm_2 = a.dtl_ac_type
-         AND b.xref_type = 'pg_xref_nfa_c'
-        WHERE a.ac_sk = fd.ac_sk
-      )
-      THEN (
-        SELECT dx.parm_1
-        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_xref dx
-        WHERE dx.xref_type = 'pg_xref_type_c'
-          AND dx.xref_val = (
-            SELECT b.iss_type
-            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac a
-            JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset b
-              ON a.instr_id = b.instr_id
-            WHERE a.ac_sk = fd.ac_sk
-            LIMIT 1
-          )
-        LIMIT 1
-      )
-      ELSE NULL
-    END AS rwd_curr_bal_desc
-) nfa_desc
     WHERE fd.ac_type_grp_dcde IN ('YIN','YLN','YRW')
       AND NOT EXISTS (
         SELECT 1
@@ -844,7 +783,6 @@ WITH
        WHERE ac.ac_sk = fd.ac_sk
     ) fb_types
     UNION ALL
-    -- zero‐row fallback
     SELECT
       fd.ac_sk,
       fd.begin_date_c     AS valn_as_of_date,
@@ -1083,7 +1021,7 @@ SELECT
   fd.ac_sk,
   fd.cust_sk,
   fd.user_sk,
-  fd.ac_type_grp_dcde,
+  fd.ac_type_grp_dcde
   fd.i_tx,
   fd.dsclmr_desc,
   fd.begin_date_c,
