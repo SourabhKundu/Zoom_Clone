@@ -1,0 +1,1040 @@
+WITH
+  params AS (
+    SELECT
+      CAST(1234     AS NUMBER) AS ac_sk,
+      CAST(1234   AS NUMBER) AS cust_sk,
+      CAST(1234  AS NUMBER) AS user_sk,
+      CAST('05/26/2025' AS DATE)   AS as_of_date
+  ),
+
+  decoder_flag AS (
+    SELECT
+      ac_sk,
+      CASE WHEN EXISTS (
+        SELECT 1
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref
+         WHERE decoder_ac_sk = params.ac_sk
+      ) THEN TRUE ELSE FALSE END AS is_decoder
+    FROM params
+  ),
+
+  account_info AS (
+    SELECT
+      a.ac_sk,
+      dt.ac_type_grp_dcde,
+      dt.dtl_ac_type,
+      a.cm_data_src_id,
+      a.cm_ac_id
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dt
+      ON a.dtl_ac_type = dt.dtl_ac_type
+    WHERE a.ac_sk = (SELECT ac_sk FROM params)
+  ),
+
+  raw_tx AS (
+    SELECT ac.ACCOUNT_LEGAL_IDENTIFIER AS base_tx
+      FROM DEV_NPF_DB.CDC_DIRECT.npf_mds_account_load_aud ac
+      JOIN DEV_NPF_DB.CDC_DIRECT.npf_mds_load_act_part_aud k
+        ON ac.n_mds_db = k.active_partition
+      JOIN DEV_NPF_DB.CDC_DIRECT.npf_mds_nrn_acc_src_sys_map_aud sys_map
+        ON ac.source_system_type = sys_map.mds_src_sys
+       AND (sys_map.mds_prod_line = ac.product_line
+         OR (sys_map.mds_prod_line IS NULL AND ac.product_line IS NULL))
+     WHERE ac.account_status_type_value <> 'Purged'
+       AND sys_map.nrn_src_sys = (SELECT cm_data_src_id FROM account_info)
+       AND ac.CONTRACT_ID      = (SELECT cm_ac_id      FROM account_info)
+  ),
+  cleaned AS (
+    SELECT CASE
+             WHEN LEFT(base_tx,1) = '-' THEN REPLACE(base_tx,'-')
+             ELSE REPLACE(base_tx,'+')
+           END AS no_sign
+    FROM raw_tx
+  ),
+  final_ssn AS (
+    SELECT CASE
+             WHEN (SELECT cm_data_src_id FROM account_info) IN (
+                    SELECT DISTINCT cm_data_src_id
+                      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
+                     WHERE data_src_id IN (5,10)
+                       AND cm_data_src_id IS NOT NULL
+                  )
+             THEN SUBSTR(no_sign,3)
+             ELSE no_sign
+           END AS i_tx
+    FROM cleaned
+  ),
+  ssn_info AS (
+    SELECT CASE
+             WHEN ai.ac_type_grp_dcde NOT IN ('PTR','MAG')
+             THEN (SELECT i_tx FROM final_ssn)
+             ELSE ''
+           END AS i_tx
+    FROM account_info ai
+  ),
+
+  dsclmr_base AS (
+    SELECT dtl.dtl_ac_type,
+           dclmr.dsclmr_desc AS v_dsclmr_desc
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+      JOIN DEV_WPA_ACCOUNTS_DB.CORE.NPF_DSCLMR dclmr
+        ON dtl.dsclmr_code = dclmr.dsclmr_code
+  ),
+
+  nl_deposit_counts AS (
+    SELECT COUNT(*)     AS v_rec_count,
+           MIN(deposit_id) AS min_dep
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_deposit
+     WHERE ac_sk = (SELECT ac_sk FROM params)
+  ),
+  nl_counter AS (
+    SELECT CASE WHEN v_rec_count > 0 THEN (
+              SELECT COUNT(*)
+                FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_deposit
+               WHERE ac_sk      = (SELECT ac_sk FROM params)
+                 AND deposit_id = nd.min_dep
+                 AND (
+                      (pra_cr_lim_amt <> 0 AND pra_cr_lim_amt IS NOT NULL)
+                   OR (pra_used_amt   <> 0 AND pra_used_amt   IS NOT NULL)
+                   OR (pra_avail_amt  <> 0 AND pra_avail_amt  IS NOT NULL)
+                 )
+            ) ELSE 0 END AS v_counter
+      FROM nl_deposit_counts nd
+  ),
+  decode_nl AS (
+    SELECT dcde_desc AS v_dcde_dsclmr_desc
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
+     WHERE dcde_type = 'NORTHERNLINE'
+       AND dcde_code = '635'
+  ),
+
+  disclaimer_info AS (
+    SELECT CASE
+      WHEN ai.ac_type_grp_dcde IN ('ACK','CHK','ICK','SAV') THEN
+        CASE
+          WHEN ai.dtl_ac_type = 'SAV' THEN db.v_dsclmr_desc
+          ELSE
+            CASE
+              WHEN nl_counter.v_counter > 0
+               AND db.v_dsclmr_desc           IS NOT NULL
+               AND decode_nl.v_dcde_dsclmr_desc IS NOT NULL
+              THEN CONCAT(db.v_dsclmr_desc, '<BR><BR>', decode_nl.v_dcde_dsclmr_desc)
+              ELSE CONCAT(
+                     COALESCE(db.v_dsclmr_desc, ''),
+                     COALESCE(decode_nl.v_dcde_dsclmr_desc, '')
+                   )
+            END
+        END
+      ELSE db.v_dsclmr_desc
+    END AS dsclmr_desc
+    FROM account_info ai
+    LEFT JOIN dsclmr_base   db   ON db.dtl_ac_type = ai.dtl_ac_type
+    CROSS JOIN nl_counter
+    CROSS JOIN decode_nl
+  ),
+
+  load_dates AS (
+    SELECT CAST(DATA_LOAD_DATE AS DATE) AS npf_data_load_date
+      FROM DEV_WPA_ACCOUNTS_DB.CORE.NPF_DATA_LOAD_DATE
+  ),
+  max_valn_base AS (
+    SELECT COALESCE(
+             MAX(valn_as_of_date),
+             (SELECT npf_data_load_date FROM load_dates)
+           ) AS v_data_load_date
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_POSN_SUM
+     WHERE ac_sk = (SELECT ac_sk FROM params)
+       AND valn_as_of_date >= (SELECT npf_data_load_date FROM load_dates)
+  ),
+  comp_dates AS (
+    SELECT vb.v_data_load_date,
+           CASE
+             WHEN ai.cm_data_src_id NOT IN (8)
+              AND TO_CHAR(vb.v_data_load_date,'DAY') LIKE 'MONDAY%'
+              AND (SELECT npf_data_load_date FROM load_dates) < vb.v_data_load_date
+             THEN (
+               SELECT MAX(valn_as_of_date)
+                 FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_POSN_SUM
+                WHERE ac_sk = (SELECT ac_sk FROM params)
+                  AND valn_as_of_date <= vb.v_data_load_date
+             )
+             ELSE vb.v_data_load_date
+           END AS begin_date_c
+      FROM max_valn_base vb
+      CROSS JOIN account_info ai
+  ),
+  valn_info AS (
+    SELECT cd.begin_date_c,
+           vs.valn_freq_dcde,
+           vs.valn_run_time   AS begin_run_time,
+           vs.valn_run_time   AS end_run_time,
+           vs.valn_as_of_date AS max_valn_date
+      FROM comp_dates cd
+      LEFT JOIN LATERAL (
+        SELECT valn_freq_dcde, valn_run_time, valn_as_of_date
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_POSN_SUM
+         WHERE ac_sk = (SELECT ac_sk FROM params)
+           AND valn_as_of_date = cd.begin_date_c
+         LIMIT 1
+      ) vs ON TRUE
+  ),
+
+  final_dates AS (
+    SELECT
+      p.ac_sk,
+      p.cust_sk,
+      p.user_sk,
+      ai.ac_type_grp_dcde,
+      ssn.i_tx,
+      df.is_decoder,
+      disp.dsclmr_desc,
+      TO_CHAR(COALESCE(p.as_of_date, vd.begin_date_c),'YYYY-MM-DD') AS begin_date_c,
+      vd.max_valn_date,
+      CASE WHEN vd.max_valn_date IS NULL THEN 1 ELSE 0 END AS display_zero_valn,
+      vd.valn_freq_dcde,
+      vd.begin_run_time,
+      vd.end_run_time
+    FROM params       p
+    CROSS JOIN account_info    ai
+    CROSS JOIN ssn_info        ssn
+    CROSS JOIN disclaimer_info disp
+    CROSS JOIN valn_info       vd
+    CROSS JOIN decoder_flag    df
+  ),
+
+  decoder_balances AS (
+    SELECT
+      fd.ac_sk,
+      cmpnt_vals.valn_as_of_date,
+      cmpnt_vals.valn_freq_dcde,
+      cmpnt_vals.valn_run_time,
+      summed.ac_accr_inc_bse_amt,
+      summed.ac_accr_exp_bse_amt,
+      summed.ac_mv_bse_amt,
+      summed.ac_bas_bse_amt,
+      CASE
+        WHEN summed.ac_bas_bse_amt IS NULL
+          OR (SELECT CASE WHEN s.ac_bas_bse_amt IS NULL OR s.ac_verif_ind_flag = 'N' THEN 'Y' ELSE 'N' END
+                FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum s
+               WHERE s.ac_sk = c.cmpnt_ac_sk
+                 AND s.valn_as_of_date = summed.valn_as_of_date LIMIT 1) = 'N'
+        THEN 'Y' ELSE 'N'
+      END AS null_cost_flag,
+      ANY_VALUE(cmpnt_vals.valn_appr_flag)    AS valn_appr_flag,
+      summed.ac_prin_cash_amt,
+      summed.ac_inc_cash_amt,
+      summed.ac_resv_cash_amt,
+      summed.ac_pend_cash_amt,
+      ANY_VALUE(cmpnt_vals.creat_by)          AS creat_by,
+      ANY_VALUE(cmpnt_vals.creat_tm)          AS creat_tm,
+      ANY_VALUE(cmpnt_vals.upd_by)            AS upd_by,
+      ANY_VALUE(cmpnt_vals.upd_tm)            AS upd_tm,
+      fd.ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref dx
+      ON dx.decoder_ac_sk = fd.ac_sk
+    JOIN LATERAL (
+      SELECT cmpnt_ac_sk
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref
+      WHERE decoder_ac_sk = fd.ac_sk
+        AND cust_sk       = fd.cust_sk
+      ORDER BY cmpnt_data_src_id, creat_tm
+      LIMIT 1
+    ) c ON TRUE
+    JOIN LATERAL (
+      SELECT *
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum s
+      WHERE s.ac_sk = c.cmpnt_ac_sk
+        AND s.valn_as_of_date = fd.max_valn_date
+        AND (s.valn_freq_dcde, s.valn_run_time) = (
+          SELECT valn_freq_dcde, valn_run_time
+            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum
+           WHERE ac_sk = c.cmpnt_ac_sk
+             AND valn_as_of_date = fd.max_valn_date
+           LIMIT 1
+        )
+    ) cmpnt_vals ON TRUE
+    JOIN LATERAL (
+      SELECT
+        SUM(ac_accr_inc_bse_amt) AS ac_accr_inc_bse_amt,
+        SUM(ac_accr_exp_bse_amt) AS ac_accr_exp_bse_amt,
+        SUM(ac_mv_bse_amt)       AS ac_mv_bse_amt,
+        SUM(ac_bas_bse_amt)      AS ac_bas_bse_amt,
+        SUM(ac_prin_cash_amt)    AS ac_prin_cash_amt,
+        SUM(ac_inc_cash_amt)     AS ac_inc_cash_amt,
+        SUM(ac_resv_cash_amt)    AS ac_resv_cash_amt,
+        SUM(ac_pend_cash_amt)    AS ac_pend_cash_amt,
+        valn_as_of_date,
+        ac_sk
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum
+      WHERE ac_sk = c.cmpnt_ac_sk
+        AND valn_as_of_date = fd.max_valn_date
+    ) summed ON TRUE
+    WHERE fd.is_decoder
+    GROUP BY
+      fd.ac_sk,
+      cmpnt_vals.valn_as_of_date,
+      cmpnt_vals.valn_freq_dcde,
+      cmpnt_vals.valn_run_time,
+      summed.ac_accr_inc_bse_amt,
+      summed.ac_accr_exp_bse_amt,
+      summed.ac_mv_bse_amt,
+      summed.ac_bas_bse_amt,
+      summed.ac_prin_cash_amt,
+      summed.ac_inc_cash_amt,
+      summed.ac_resv_cash_amt,
+      summed.ac_pend_cash_amt,
+      fd.ac_type_grp_dcde
+  ),
+
+    nonbank_balances AS (
+    SELECT
+      fd.ac_sk,
+      sum.valn_as_of_date,
+      sum.valn_freq_dcde,
+      sum.valn_run_time,
+      sum.ac_accr_inc_bse_amt,
+      sum.ac_accr_exp_bse_amt,
+      sum.ac_mv_bse_amt,
+      sum.ac_bas_bse_amt,
+      CASE
+        WHEN sum.ac_bas_bse_amt IS NULL
+          OR sum.ac_verif_ind_flag = 'N'
+        THEN 'Y' ELSE 'N'
+      END AS null_cost_flag,
+      sum.valn_appr_flag,
+      sum.ac_prin_cash_amt,
+      sum.ac_inc_cash_amt,
+      sum.ac_resv_cash_amt,
+      sum.ac_pend_cash_amt,
+      sum.creat_by,
+      sum.creat_tm,
+      sum.upd_by,
+      sum.upd_tm,
+      nt.ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+      ON sum.ac_sk = fd.ac_sk
+     AND sum.valn_as_of_date = fd.max_valn_date
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) nt
+    WHERE fd.ac_type_grp_dcde IN ('BRK','IMA','ITR','MMD','RTR','SEC')
+    UNION ALL
+    -- zero‐row fallback
+    SELECT
+      fd.ac_sk                AS ac_sk,
+      fd.begin_date_c         AS valn_as_of_date,
+      NULL                    AS valn_freq_dcde,
+      NULL                    AS valn_run_time,
+      0                       AS ac_accr_inc_bse_amt,
+      0                       AS ac_accr_exp_bse_amt,
+      0                       AS ac_mv_bse_amt,
+      0                       AS ac_bas_bse_amt,
+      'Y'             AS null_cost_flag,
+      NULL                    AS valn_appr_flag,
+      0                       AS ac_prin_cash_amt,
+      0                       AS ac_inc_cash_amt,
+      0                       AS ac_resv_cash_amt,
+      0                       AS ac_pend_cash_amt,
+      NULL                    AS creat_by,
+      NULL                    AS creat_tm,
+      NULL                    AS upd_by,
+      NULL                    AS upd_tm,
+      nt.ac_type_grp_dcde
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) nt
+    WHERE fd.ac_type_grp_dcde IN ('BRK','IMA','ITR','MMD','RTR','SEC')
+      AND NOT EXISTS (
+        SELECT 1
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+         WHERE sum.ac_sk = fd.ac_sk
+           AND sum.valn_as_of_date = fd.max_valn_date
+      )
+  ),
+
+  loan_balances AS (
+    SELECT
+      fd.ac_sk,                          
+      l.valn_as_of_date,                 
+      NULL                AS valn_freq_dcde,    
+      NULL                AS valn_run_time,     
+      0                   AS ac_accr_inc_bse_amt, 
+      0                   AS ac_accr_exp_bse_amt, 
+      0                   AS ac_mv_bse_amt,       
+      0                   AS ac_bas_bse_amt,      
+      'Y'                 AS null_cost_flag,      
+      NULL                AS valn_appr_flag,      
+      0                   AS ac_prin_cash_amt,    
+      0                   AS ac_inc_cash_amt,     
+      0                   AS ac_resv_cash_amt,    
+      0                   AS ac_pend_cash_amt,    
+      NULL                AS creat_by,            
+      NULL                AS creat_tm,            
+      NULL                AS upd_by,              
+      NULL                AS upd_tm,              
+     lt.ac_type_grp_dcde AS ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_loan l
+      ON l.ac_sk = fd.ac_sk
+     AND l.valn_as_of_date = fd.max_valn_date
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) lt
+    WHERE fd.ac_type_grp_dcde IN ('ECL','INL','MOL','CCL','CCM')
+    UNION ALL
+    SELECT
+      fd.ac_sk,                          
+      fd.begin_date_c     AS valn_as_of_date, 
+      NULL                AS valn_freq_dcde,    
+      NULL                AS valn_run_time,     
+      0                   AS ac_accr_inc_bse_amt, 
+      0                   AS ac_accr_exp_bse_amt, 
+      0                   AS ac_mv_bse_amt,       
+      0                   AS ac_bas_bse_amt,      
+      'Y'                 AS null_cost_flag,      
+      NULL                AS valn_appr_flag,      
+      0                   AS ac_prin_cash_amt,    
+      0                   AS ac_inc_cash_amt,     
+      0                   AS ac_resv_cash_amt,    
+      0                   AS ac_pend_cash_amt,    
+      NULL                AS creat_by,            
+      NULL                AS creat_tm,            
+      NULL                AS upd_by,              
+      NULL                AS upd_tm,              
+      lt.ac_type_grp_dcde AS ac_type_grp_dcde      
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) lt
+    WHERE fd.ac_type_grp_dcde IN ('ECL','INL','MOL','CCL','CCM')
+      AND NOT EXISTS (
+        SELECT 1
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_loan l
+         WHERE l.ac_sk = fd.ac_sk
+           AND l.valn_as_of_date = fd.max_valn_date
+      )
+  ),
+
+  mf_balances AS (
+    SELECT
+      fd.ac_sk,
+      pos.valn_as_of_date,
+      pos.valn_run_time   AS valn_run_time,
+      pos.valn_freq_dcde,
+      pos.ac_bas_bse_amt AS ac_accr_inc_bse_amt,
+      NULL                AS ac_accr_exp_bse_amt,
+      pos.ac_mv_bse_amt      AS ac_mv_bse_amt,
+      pos.ac_bas_bse_amt AS ac_bas_bse_amt,
+      pos.ac_verif_ind_flag  AS null_cost_flag,
+      NULL                AS valn_appr_flag,
+      0                   AS ac_prin_cash_amt,
+      0                   AS ac_inc_cash_amt,
+      0                   AS ac_resv_cash_amt,
+      0                   AS ac_pend_cash_amt,
+      pos.creat_by         AS creat_by,
+      pos.creat_tm        AS creat_tm,
+      pos.upd_by          AS upd_by,
+      pos.upd_tm          AS upd_tm,
+      mf_types.ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum pos
+      ON pos.ac_sk = fd.ac_sk
+     AND pos.valn_as_of_date = fd.max_valn_date
+     AND pos.valn_freq_dcde  = fd.valn_freq_dcde
+     AND pos.valn_run_time   = fd.begin_run_time
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) mf_types
+    WHERE fd.ac_type_grp_dcde = 'MUT'
+    UNION ALL
+    -- zero‐row fallback
+    SELECT
+      fd.ac_sk           AS ac_sk,
+      fd.begin_date_c    AS valn_as_of_date,
+      NULL               AS valn_run_time,
+      NULL               AS valn_freq_dcde,
+      0                  AS ac_accr_inc_bse_amt,
+      0                  AS ac_accr_exp_bse_amt,
+      0                  AS ac_mv_bse_amt,
+      0                  AS ac_bas_bse_amt,
+      'Y'        AS null_cost_flag,
+      NULL               AS valn_appr_flag,
+      0                  AS ac_prin_cash_amt,
+      0                  AS ac_inc_cash_amt,
+      0                  AS ac_resv_cash_amt,
+      0                  AS ac_pend_cash_amt,
+      NULL               AS creat_by,
+      NULL               AS creat_tm,
+      NULL               AS upd_by,
+      NULL               AS upd_tm,
+      mf_types.ac_type_grp_dcde
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) mf_types
+    WHERE fd.ac_type_grp_dcde = 'MUT'
+      AND NOT EXISTS (
+        SELECT 1
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum pos
+         WHERE pos.ac_sk = fd.ac_sk
+           AND pos.valn_as_of_date = fd.max_valn_date
+           AND pos.valn_freq_dcde  = fd.valn_freq_dcde
+           AND pos.valn_run_time   = fd.begin_run_time
+      )
+  ),
+
+  mag_balances AS (
+    SELECT
+      fd.ac_sk,
+      sum.valn_as_of_date,
+      sum.valn_freq_dcde,
+      sum.valn_run_time,
+      sum.ac_accr_inc_bse_amt,
+      sum.ac_accr_exp_bse_amt,
+      sum.ac_mv_bse_amt,
+      sum.ac_bas_bse_amt,
+      NULL as null_cost_flag,
+      sum.valn_appr_flag,
+      sum.ac_prin_cash_amt,
+      sum.ac_inc_cash_amt,
+      sum.ac_resv_cash_amt,
+      sum.ac_pend_cash_amt,
+      sum.creat_by,
+      sum.creat_tm,
+      sum.upd_by,
+      sum.upd_tm,
+      ma_types.ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+      ON sum.ac_sk = fd.ac_sk
+     AND sum.valn_as_of_date = fd.max_valn_date
+     AND sum.valn_freq_dcde  = fd.valn_freq_dcde
+     AND sum.valn_run_time   = fd.begin_run_time
+    LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.NPF_AC_AGGREGATION aggr
+      ON aggr.ac_sk = fd.ac_sk
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) ma_types
+    WHERE fd.ac_type_grp_dcde = 'MAG'
+    UNION ALL
+    -- zero‐row fallback
+    SELECT
+      fd.ac_sk            AS ac_sk,
+      fd.begin_date_c     AS valn_as_of_date,
+      NULL                AS valn_freq_dcde,
+      NULL                AS valn_run_time,
+      0                   AS ac_accr_inc_bse_amt,
+      0                   AS ac_accr_exp_bse_amt,
+      0                   AS ac_mv_bse_amt,
+      0                   AS ac_bas_bse_amt,
+      NULL                AS valn_appr_flag,
+      NULL         AS null_cost_flag,
+      0                   AS ac_prin_cash_amt,
+      0                   AS ac_inc_cash_amt,
+      0                   AS ac_resv_cash_amt,
+      0                   AS ac_pend_cash_amt,
+      NULL                AS creat_by,
+      NULL                AS creat_tm,
+      NULL                AS upd_by,
+      NULL                AS upd_tm,
+      ma_types.ac_type_grp_dcde
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) ma_types
+    WHERE fd.ac_type_grp_dcde = 'MAG'
+      AND NOT EXISTS (
+        SELECT 1
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+          JOIN DEV_WPA_ACCOUNTS_DB.CORE.NPF_AC_AGGREGATION aggr
+            ON sum.ac_sk = aggr.ac_sk
+         WHERE sum.ac_sk = fd.ac_sk
+           AND sum.valn_as_of_date = fd.max_valn_date
+           AND sum.valn_freq_dcde  = fd.valn_freq_dcde
+           AND sum.valn_run_time   = fd.begin_run_time
+      )
+  ),
+
+  ptr_balances AS (
+    SELECT
+      fd.ac_sk,
+      sum.valn_as_of_date,
+      sum.valn_freq_dcde,
+      sum.valn_run_time,
+      sum.ac_accr_inc_bse_amt,
+      sum.ac_accr_exp_bse_amt,
+      sum.ac_mv_bse_amt,
+      sum.ac_bas_bse_amt,
+      sum.valn_appr_flag,
+      NULL AS null_cost_flag,
+      sum.ac_prin_cash_amt,
+      sum.ac_inc_cash_amt,
+      sum.ac_resv_cash_amt,
+      sum.ac_pend_cash_amt,
+      sum.creat_by,
+      sum.creat_tm,
+      sum.upd_by,
+      sum.upd_tm,
+      ptr_types.ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+      ON sum.ac_sk = fd.ac_sk
+     AND sum.valn_as_of_date = fd.max_valn_date
+     AND sum.valn_freq_dcde  = fd.valn_freq_dcde
+     AND sum.valn_run_time   = fd.begin_run_time
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac prtnr_ac
+      ON prtnr_ac.ac_sk = fd.ac_sk
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr prtnr
+      ON prtnr_ac.prtnr_sk = prtnr.prtnr_sk
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) ptr_types
+    WHERE fd.ac_type_grp_dcde = 'PTR'
+    UNION ALL
+    -- zero‐row fallback
+    SELECT
+      fd.ac_sk,
+      fd.begin_date_c     AS valn_as_of_date,
+      NULL                AS valn_freq_dcde,
+      NULL                AS valn_run_time,
+      0                   AS ac_accr_inc_bse_amt,
+      0                   AS ac_accr_exp_bse_amt,
+      0                   AS ac_mv_bse_amt,
+      0                   AS ac_bas_bse_amt,
+      NULL                AS null_cost_flag,
+      NULL                AS valn_appr_flag,
+      0                   AS ac_prin_cash_amt,
+      0                   AS ac_inc_cash_amt,
+      0                   AS ac_resv_cash_amt,
+      0                   AS ac_pend_cash_amt,
+      NULL                AS creat_by,
+      NULL                AS creat_tm,
+      NULL                AS upd_by,
+      NULL                AS upd_tm,
+      ptr_types.ac_type_grp_dcde
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) ptr_types
+    WHERE fd.ac_type_grp_dcde = 'PTR'
+      AND NOT EXISTS (
+        SELECT 1
+          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+         WHERE sum.ac_sk = fd.ac_sk
+           AND sum.valn_as_of_date = fd.max_valn_date
+           AND sum.valn_freq_dcde  = fd.valn_freq_dcde
+           AND sum.valn_run_time   = fd.begin_run_time
+      )
+  ),
+
+  yodlee_balances AS (
+    SELECT
+      fd.ac_sk,
+      b.valn_as_of_date,
+      b.valn_freq_dcde,
+      b.valn_run_time,
+      a.ac_commt_amt   AS ac_accr_inc_bse_amt, 
+      a.ac_fund_amt    AS ac_accr_exp_bse_amt,
+      NULL             AS ac_mv_bse_amt,
+      NULL             AS ac_bas_bse_amt,
+      NULL             AS null_cost_flag,
+      NULL             AS valn_appr_flag,
+      NULL             AS ac_prin_cash_amt,
+      NULL             AS ac_inc_cash_amt,
+      NULL             AS ac_resv_cash_amt,
+      NULL             AS ac_pend_cash_amt,
+      a.creat_by,
+      a.creat_tm,
+      a.upd_by,
+      a.upd_tm,
+      yo_types.ac_type_grp_dcde
+
+    FROM final_dates fd
+    JOIN DEV_WPA_ACCOUNTS_DB.CORE.NPF_AC_AGGREGATION a
+      ON a.ac_sk = fd.ac_sk
+    LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum b
+      ON b.ac_sk = a.ac_sk
+     AND b.valn_as_of_date = fd.max_valn_date
+     AND b.valn_freq_dcde  = fd.valn_freq_dcde
+     AND b.valn_run_time   = fd.begin_run_time
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) yo_types
+    WHERE fd.ac_type_grp_dcde IN ('YIN','YLN','YRW')
+    UNION ALL
+    -- zero‐row fallback
+    SELECT
+      fd.ac_sk,
+      fd.begin_date_c     AS valn_as_of_date,
+      NULL                AS valn_freq_dcde,
+      NULL                AS valn_run_time,
+      0                   AS ac_accr_inc_bse_amt,
+      0                   AS ac_accr_exp_bse_amt,
+      0                   AS ac_mv_bse_amt,
+      0                   AS ac_bas_bse_amt,
+      'Y'         AS null_cost_flag,
+      NULL                AS valn_appr_flag,
+      0                   AS ac_prin_cash_amt,
+      0                   AS ac_inc_cash_amt,
+      0                   AS ac_resv_cash_amt,
+      0                   AS ac_pend_cash_amt,
+      NULL                AS creat_by,
+      NULL                AS creat_tm,
+      NULL                AS upd_by,
+      NULL                AS upd_tm,
+      yo_types.ac_type_grp_dcde
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) yo_types
+    WHERE fd.ac_type_grp_dcde IN ('YIN','YLN','YRW')
+      AND NOT EXISTS (
+        SELECT 1
+          FROM DEV_WPA_ACCOUNTS_DB.CORE.NPF_AC_AGGREGATION a
+          JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum b
+            ON a.ac_sk = b.ac_sk
+         WHERE a.ac_sk = fd.ac_sk
+           AND b.valn_as_of_date = fd.max_valn_date
+           AND b.valn_freq_dcde  = fd.valn_freq_dcde
+           AND b.valn_run_time   = fd.begin_run_time
+      )
+  ),
+
+  fallback_balances AS (
+    SELECT
+      fd.ac_sk,
+      sum.valn_as_of_date,
+      sum.valn_freq_dcde,
+      sum.valn_run_time,
+      sum.ac_accr_inc_bse_amt,
+      sum.ac_accr_exp_bse_amt,
+      sum.ac_mv_bse_amt,
+      sum.ac_bas_bse_amt,
+      sum.valn_appr_flag,
+      sum.ac_prin_cash_amt,
+      sum.ac_inc_cash_amt,
+      sum.ac_resv_cash_amt,
+      sum.ac_pend_cash_amt,
+      sum.creat_by,
+      sum.creat_tm,
+      sum.upd_by,
+      sum.upd_tm,
+      fb_types.ac_type_grp_dcde
+    FROM final_dates fd
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+      ON sum.ac_sk = fd.ac_sk
+     AND sum.valn_as_of_date = fd.max_valn_date
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) fb_types
+    UNION ALL
+    -- zero‐row fallback
+    SELECT
+      fd.ac_sk,
+      fd.begin_date_c     AS valn_as_of_date,
+      NULL                AS valn_freq_dcde,
+      NULL                AS valn_run_time,
+      0                   AS ac_accr_inc_bse_amt,
+      0                   AS ac_accr_exp_bse_amt,
+      0                   AS ac_mv_bse_amt,
+      0                   AS ac_bas_bse_amt,
+      NULL                AS valn_appr_flag,
+      0                   AS ac_prin_cash_amt,
+      0                   AS ac_inc_cash_amt,
+      0                   AS ac_resv_cash_amt,
+      0                   AS ac_pend_cash_amt,
+      NULL                AS creat_by,
+      NULL                AS creat_tm,
+      NULL                AS upd_by,
+      NULL                AS upd_tm,
+      fb_types.ac_type_grp_dcde
+    FROM final_dates fd
+    CROSS JOIN LATERAL (
+      SELECT dtl.ac_type_grp_dcde, dtl.dtl_ac_type
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account ac
+        JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type dtl
+          ON ac.dtl_ac_type = dtl.dtl_ac_type
+       WHERE ac.ac_sk = fd.ac_sk
+    ) fb_types
+    WHERE NOT EXISTS (
+      SELECT 1
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_posn_sum sum
+       WHERE sum.ac_sk = fd.ac_sk
+         AND sum.valn_as_of_date = fd.max_valn_date
+    )
+  ),
+
+  balances AS (
+    SELECT * FROM decoder_balances
+    UNION ALL
+    SELECT * FROM nonbank_balances
+    UNION ALL
+    SELECT * FROM loan_balances
+    UNION ALL
+    SELECT * FROM mf_balances
+    UNION ALL
+    SELECT * FROM mag_balances
+    UNION ALL
+    SELECT * FROM ptr_balances
+    UNION ALL
+    SELECT * FROM yodlee_balances
+    UNION ALL
+    SELECT * FROM fallback_balances
+  ),
+
+  dt_dec AS (
+    SELECT
+      cmpnt_ac_sk,
+      decoder_ac_sk,
+      decoder_ac_id
+    FROM (
+      SELECT
+        cmpnt_ac_sk,
+        decoder_ac_sk,
+        decoder_ac_id,
+        ROW_NUMBER() OVER (ORDER BY cmpnt_data_src_id, creat_tm) AS rn
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decoder_xref
+      WHERE decoder_ac_sk = (SELECT ac_sk FROM params)
+    ) t
+    WHERE rn = 1
+  ),
+  dt_base_ac AS (
+    SELECT
+      COALESCE(cmpnt_ac_sk, (SELECT ac_sk FROM params)) AS base_ac_sk,
+      decoder_ac_sk,
+      decoder_ac_id
+    FROM dt_dec
+  ),
+  dt_lnkd_ac_info AS (
+    SELECT
+      b.ac_sk,
+      a.ac_id   AS lnkd_ac_id,
+      a.ac_desc AS lnkd_ac_desc,
+      b.lnkd_ac_sk
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac b
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account a
+      ON a.ac_sk = b.lnkd_ac_sk
+  ),
+  dt_lnkd_ast_info AS (
+    SELECT
+      a.ac_sk,
+      b.ast_short_desc,
+      b.ast_long_desc,
+      b.tnt_sec_id,
+      b.iss_type,
+      b.man_aggr_ast_id,
+      b.vintage_yr,
+      a.instr_id
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset b
+      ON a.instr_id = b.instr_id
+  ),
+  dt_special_data_sources AS (
+    SELECT DISTINCT cm_data_src_id
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account
+     WHERE data_src_id IN (5,10)
+       AND cm_data_src_id IS NOT NULL
+  ),
+  dt_tx_id_prep AS (
+    SELECT
+      sys_map.nrn_src_sys   AS i_src_sys,
+      ac_mds.CONTRACT_ID    AS i_nrn_ac,
+      CASE
+        WHEN LEFT(ac_mds.ACCOUNT_LEGAL_IDENTIFIER,1) IN ('-','+')
+        THEN SUBSTR(ac_mds.ACCOUNT_LEGAL_IDENTIFIER,2)
+        ELSE ac_mds.ACCOUNT_LEGAL_IDENTIFIER
+      END AS cleaned_tx,
+      CASE WHEN sys_map.nrn_src_sys IN (
+             SELECT cm_data_src_id FROM dt_special_data_sources
+           ) THEN TRUE ELSE FALSE END AS needs_substr
+    FROM DEV_NPF_DB.CDC_DIRECT.NPF_MDS_ACCOUNT_LOAD_AUD ac_mds
+    JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_LOAD_ACT_PART_AUD k
+      ON ac_mds.n_mds_db = k.active_partition
+    JOIN DEV_NPF_DB.CDC_DIRECT.NPF_MDS_NRN_ACC_SRC_SYS_MAP_AUD sys_map
+      ON ac_mds.source_system_type = sys_map.mds_src_sys
+     AND (
+       sys_map.mds_prod_line = ac_mds.product_line
+       OR (sys_map.mds_prod_line IS NULL AND ac_mds.product_line IS NULL)
+     )
+    WHERE ac_mds.account_status_type_value <> 'Purged'
+  ),
+  dt_user_prefs AS (
+    SELECT
+      ac2.AC_SK,
+      MAX(CASE WHEN usr2.DFLT_RPTG_TYPE = 'PCS' THEN 1 ELSE 0 END) AS has_pcs
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_USER       usr2
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER ac2
+      ON usr2.USER_SK = ac2.USER_SK
+    WHERE ac2.CUST_SK = (SELECT cust_sk FROM params)
+    GROUP BY ac2.AC_SK
+  ),
+  dt_account_attrs AS (
+    SELECT
+      a.ac_sk,
+      MAX(b.attrb_id || '|' || b.attrb_desc) AS attrb_desc1
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_attrb a
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_attribute b
+      ON a.attrb_id = b.attrb_id
+    WHERE b.cust_sk = (SELECT cust_sk FROM params)
+      AND b.attrb_hdr_seq = 1
+    GROUP BY a.ac_sk
+  ),
+  dt_account_access AS (
+    SELECT DISTINCT AC_SK
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.NPF_AC_CUST_USER
+     WHERE CUST_SK = (SELECT cust_sk FROM params)
+  ),
+  dt_decode_data AS (
+    SELECT 
+      d1.dcde_code AS curr_code,
+      d1.dcde_desc AS curr_desc,
+      d2.dcde_code AS liab_code,
+      d2.dcde_desc AS liab_desc
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode d1
+    LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode d2
+      ON d2.dcde_type = 'LIABFLAG'
+    WHERE d1.dcde_type = 'CURRDDLB'
+  ),
+  dt_decode_invobj AS (
+    SELECT dcde_code AS inv_code, dcde_desc AS inv_desc
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
+     WHERE dcde_type = 'INVOBJ'
+  ),
+  dt_decode_pcrstyle AS (
+    SELECT dcde_code AS inv_code, dcde_desc AS inv_desc
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
+     WHERE dcde_type = 'PCRSTYLE'
+  ),
+  dt_account_data AS (
+    SELECT
+      ac.*,
+      dt_base_ac.decoder_ac_sk,
+      dt_base_ac.decoder_ac_id,
+      actype.ac_type_desc,
+      dtltype.dtl_ac_type_desc,
+      dtltype.ac_type_grp_dcde,
+      dtltype.prod_info_url_desc,
+      src.ac_dtl_src_desc,
+      src.extl_flg,
+      alias.upd_ac_desc,
+      alias.ac_alias,
+      alias.cust_sk,
+      acagr.lst_valn_date,
+      acagr.ast_acq_date,
+      acagr.ac_commt_amt,
+      acagr.ac_fund_amt,
+      acagr.aggr_ast_id,
+      pi.indx_sk,
+      pi.indx_desc,
+      lnkd_ac.lnkd_ac_sk,
+      lnkd_ac.lnkd_ac_id,
+      lnkd_ac.lnkd_ac_desc,
+      lnkd_ast.ast_short_desc,
+      lnkd_ast.ast_long_desc,
+      lnkd_ast.tnt_sec_id,
+      lnkd_ast.iss_type,
+      lnkd_ast.man_aggr_ast_id,
+      lnkd_ast.vintage_yr,
+      tx.cleaned_tx    AS raw_tx,
+      tx.needs_substr,
+      CASE WHEN aa.AC_SK IS NOT NULL THEN 1 ELSE 0 END AS has_access,
+      up.has_pcs,
+      attr.attrb_desc1,
+      invobj.inv_desc   AS inv_desc_obj,
+      pcrstyle.inv_desc AS inv_desc_pcr
+    FROM dt_base_ac
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account        ac    ON ac.ac_sk = dt_base_ac.base_ac_sk
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_cust_ac_alias alias ON alias.ac_sk = ac.ac_sk
+      AND alias.cust_sk = (SELECT cust_sk FROM params)
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_ac_type        actype ON actype.ac_type = ac.ac_type
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_dtl_ac_type    dtltype ON dtltype.dtl_ac_type = ac.dtl_ac_type
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_src       src    ON src.data_src_id = ac.data_src_id
+    LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.NPF_AC_AGGREGATION acagr ON acagr.ac_sk = ac.ac_sk
+    LEFT JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_perf_indx        pi    ON pi.indx_sk = (SELECT cust_sk FROM params)
+    LEFT JOIN dt_lnkd_ac_info                                   lnkd_ac ON lnkd_ac.ac_sk = ac.ac_sk
+    LEFT JOIN dt_lnkd_ast_info                                  lnkd_ast ON lnkd_ast.ac_sk = ac.ac_sk
+    LEFT JOIN dt_tx_id_prep                                     tx      ON tx.i_src_sys = ac.cm_data_src_id
+                                                                AND tx.i_nrn_ac  = ac.cm_ac_id
+    LEFT JOIN dt_account_access                                 aa      ON aa.AC_SK = ac.ac_sk
+    LEFT JOIN dt_user_prefs                                     up      ON up.AC_SK = ac.ac_sk
+    LEFT JOIN dt_account_attrs                                  attr    ON attr.ac_sk = ac.ac_sk
+    LEFT JOIN dt_decode_invobj                                  invobj  ON invobj.inv_code  = ac.inv_obj_dcde
+    LEFT JOIN dt_decode_pcrstyle                                pcrstyle ON pcrstyle.inv_code = ac.inv_obj_dcde
+  )
+
+SELECT
+  fd.ac_sk,
+  fd.cust_sk,
+  fd.user_sk,
+  fd.ac_type_grp_dcde,
+  fd.i_tx,
+  fd.dsclmr_desc,
+  fd.begin_date_c,
+  fd.max_valn_date,
+  fd.display_zero_valn,
+  b.cur_out.*,
+  ad.*,
+  dd.curr_code,
+  dd.curr_desc,
+  dd.liab_code,
+  dd.liab_desc
+FROM final_dates     fd
+LEFT JOIN balances   b  ON TRUE
+LEFT JOIN dt_account_data ad ON ad.ac_sk = fd.ac_sk
+LEFT JOIN dt_decode_data    dd ON dd.curr_code = ad.bse_curr_dcde
+                            OR dd.liab_code = ad.liab_flag;
