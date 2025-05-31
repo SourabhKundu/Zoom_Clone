@@ -1,0 +1,7 @@
+SELECT
+  $my_ssp_proc       AS ssp_proc,
+  cmnty_id,
+  cmnty_desc
+FROM wpa_ssp_cmnty
+ORDER BY cmnty_id
+;
