@@ -1,0 +1,116 @@
+WITH
+  data_src_calc AS (
+    SELECT
+      DISTINCT ac.data_src_id,
+      COALESCE(vw.src_stream_id, 0)                                  AS src_strm_id,
+      mstr.valn_as_of_date,
+      CASE
+        WHEN COALESCE(vw.src_stream_id, 0) <> 0 THEN (
+          SELECT
+            MAX(TRUNC(ms.data_load_date))
+          FROM wpadbo.wpa_data_load_src_strm ms
+          WHERE
+            ms.data_load_finished = 'COMPLETED'
+            AND ms.data_src_id = ac.data_src_id
+            AND ms.src_strm_id = COALESCE(vw.src_stream_id, 0)
+            AND ms.data_load_date <= $v_valn_date     -- bind or literal
+        )
+        ELSE (
+          SELECT
+            MAX(TRUNC(ms.data_load_date))
+          FROM wpadbo.wpa_data_load_src_strm ms
+          WHERE
+            ms.data_load_finished = 'COMPLETED'
+            AND ms.data_src_id = ac.data_src_id
+            AND ms.data_load_date <= $v_valn_date     -- bind or literal
+        )
+      END AS max_valn_as_of_date
+    FROM
+      npf_ac_cust_user    acu
+      JOIN npf_user      usr   ON acu.user_sk = usr.user_sk
+      JOIN npf_customer  cust  ON acu.cust_sk = cust.cust_sk
+      JOIN npf_account   ac    ON acu.ac_sk = ac.ac_sk
+      LEFT JOIN wpa_nws_data_load_mstr mstr
+        ON mstr.data_src_id = ac.data_src_id
+       AND mstr.valn_as_of_date = $v_valn_date        -- bind or literal
+      LEFT JOIN wpa_data_load_src_strm mstr_strm
+        ON mstr_strm.data_src_id = ac.data_src_id
+       AND mstr_strm.data_load_date = $v_valn_date    -- bind or literal
+      LEFT JOIN npfdbO.npf_stream_ac_vw vw
+        ON vw.ac_sk = ac.ac_sk
+    WHERE
+      usr.user_sk = $v_user_sk       -- bind or literal
+      AND acu.cust_sk = $p_cust_sk    -- bind or literal
+  ),
+
+  src AS (
+    SELECT
+      src.data_src_id,
+      COALESCE(strm.src_stream_id, 0)      AS src_stream_id,
+      src.data_src_desc,
+      d.dcde_desc,
+      d.sort_nbr
+    FROM npf_data_src AS src
+    LEFT JOIN npfdbO.npf_data_src_stream AS strm
+      ON strm.data_src_id = src.data_src_id
+     AND strm.property_type = 'REGION_SK'
+     AND strm.run_freq = 'DAILY'
+    LEFT JOIN npf_decode AS d
+      ON src.data_src_id || '-' || COALESCE(strm.src_stream_id, 0) = d.dcde_code
+     AND d.dcde_type = 'WPA_SRC_AVAIL'
+    WHERE src.data_src_id NOT IN (9, 11, 13, 15)
+  )
+
+SELECT
+  DISTINCT
+  mstr.data_src_id,
+  s.data_src_desc,
+  CASE
+    WHEN ($v_is_weekend = '1' AND mstr.data_src_id IN (8, 15) AND mstr2.data_load_finished = 'COMPLETED')
+      THEN 'TRUE'
+    WHEN ($v_is_weekend = '1' AND mstr.data_src_id IN (8, 15) AND mstr2.data_load_finished <> 'COMPLETED') THEN (
+      SELECT
+        CASE
+          WHEN ms.data_load_finished = 'TRUE' THEN 'TRUE'
+          ELSE 'FALSE'
+        END
+      FROM wpadbo.wpa_nws_data_load_mstr ms
+      WHERE
+        ms.data_src_id = mstr.data_src_id
+        AND ms.valn_as_of_date = $v_valn_date - 1
+      LIMIT 1
+    )
+    WHEN ($v_is_weekend = '1' AND mstr.data_src_id NOT IN (8, 15)) THEN (
+      SELECT
+        CASE
+          WHEN ms.data_load_finished = 'TRUE' THEN 'TRUE'
+          ELSE 'FALSE'
+        END
+      FROM wpadbo.wpa_nws_data_load_mstr ms
+      WHERE
+        ms.data_src_id = mstr.data_src_id
+        AND ms.valn_as_of_date = $v_last_busn_date
+      LIMIT 1
+    )
+    WHEN ($v_is_weekend = '0' AND mstr2.data_load_finished = 'COMPLETED')
+      THEN 'TRUE'
+    ELSE 'FALSE'
+  END AS dataload_finished,
+  mstr.valn_as_of_date,
+  dsc.max_valn_as_of_date,
+  s.dcde_desc            AS data_source_name,
+  s.sort_nbr             AS data_source_order
+FROM wpadbo.data_src AS mstr
+LEFT JOIN wpa_data_load_src_strm AS mstr2
+  ON mstr2.data_src_id = mstr.data_src_id
+ AND mstr2.src_strm_id = mstr.src_strm_id
+ AND mstr2.data_load_date = mstr.valn_as_of_date
+ AND mstr2.data_load_finished = 'COMPLETED'
+INNER JOIN src AS s
+  ON mstr.data_src_id = s.data_src_id
+ AND mstr.src_strm_id = s.src_stream_id
+LEFT JOIN data_src_calc AS dsc
+  ON mstr.data_src_id = dsc.data_src_id
+ AND mstr.src_strm_id = dsc.src_strm_id
+WHERE mstr.valn_as_of_date = $v_valn_date  -- bind or literal
+ORDER BY data_source_order ASC;
