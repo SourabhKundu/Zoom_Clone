@@ -1,21 +1,28 @@
 WITH split_codes AS (
   SELECT
-    regexp_substr(v_cmnty_code, '[^,]+', 1, LEVEL) AS cmnty_cde
-  FROM DUAL
-  CONNECT BY regexp_substr(v_cmnty_code, '[^,]+', 1, LEVEL) IS NOT NULL
+    TRIM(value::string) AS cmnty_cde
+  FROM TABLE(
+    FLATTEN(
+      INPUT => SPLIT(v_cmnty_code, ',')
+    )
+  )
 )
 SELECT
   SSP.SSP_ID,
   SSP.SSP_DESC,
-  DECODE(SSP.SSP_MSG_URL, NULL, SSP.SSP_MSG_TEXT_CLOB, SSP.SSP_MSG_URL) AS SSP_CONTENT,
-  DECODE(SSP.SSP_MSG_URL, NULL, 'MSG', 'URL')            AS SSP_TYPE,
+  IFF(SSP.SSP_MSG_URL IS NULL,
+      SSP.SSP_MSG_TEXT_CLOB,
+      SSP.SSP_MSG_URL)            AS SSP_CONTENT,
+  IFF(SSP.SSP_MSG_URL IS NULL, 'MSG', 'URL') AS SSP_TYPE,
   SSP.SSP_START_DATE,
-  'public'                                               AS SSP_DISPLAY_TYPE
+  'public'                                  AS SSP_DISPLAY_TYPE
 FROM WPA_SSP SSP
 JOIN WPA_SSP_CMNTY SSP_CMNTY
   ON SSP.CMNTY_ID = SSP_CMNTY.CMNTY_ID
 WHERE
   SSP_CMNTY.CMNTY_CDE IN (SELECT cmnty_cde FROM split_codes)
-  AND SYSDATE BETWEEN SSP.SSP_START_DATE AND SSP.SSP_END_DATE
+  AND CURRENT_DATE() 
+      BETWEEN SSP.SSP_START_DATE 
+          AND SSP.SSP_END_DATE
 ORDER BY
   SSP.SSP_START_DATE DESC;
