@@ -34,22 +34,14 @@ WITH data_src_calc AS (
   LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.wpa_data_load_src_strm AS mstr_strm
     ON mstr_strm.data_src_id   = ac.data_src_id
    AND CAST(mstr_strm.data_load_date AS DATE) = DATE '2025-11-17'
-
-  /* ────────────────────────────────────────────────────────────────────────── */
-  /* Inline of “NPF_STREAM_AC_VW” begins here                               */
   LEFT JOIN (
     SELECT DISTINCT
-      /* remap SRC_STREAM_ID = 203→204, 205→206, else keep same */
       CASE
         WHEN sds.src_stream_id = 203 THEN 204
         WHEN sds.src_stream_id = 205 THEN 206
         ELSE sds.src_stream_id
       END AS src_stream_id,
-
-      /* this is the same data_src_id that the view exposed */
       sds.data_src_id,
-
-      /* the account key from the relationship table */
       acr.ac_sk
     FROM NPFDBO.NPF_DATA_SRC_STREAM AS sds,
          TABLE(
@@ -61,7 +53,6 @@ WITH data_src_calc AS (
            )
          ) AS f
       JOIN NPFDBO.NPF_RGN_MSTR AS rgn
-        /* interpret “ALL” as 0; otherwise cast the string to a number */
         ON rgn.rgn_sk = CASE
                           WHEN f.value = 'ALL' THEN 0
                           ELSE TO_NUMBER(f.value)
@@ -72,9 +63,6 @@ WITH data_src_calc AS (
       sds.property_type = 'REGION_SK'
   ) AS vw
     ON vw.ac_sk = ac.ac_sk
-  /* Inline of “NPF_STREAM_AC_VW” ends here                                 */
-  /* ────────────────────────────────────────────────────────────────────────── */
-
   WHERE
     usr.user_sk  = 1234
     AND acu.cust_sk = 1234
