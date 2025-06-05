@@ -1,0 +1,52 @@
+WITH
+  primary_user AS (
+    SELECT
+      user_type_dcde
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user
+    WHERE user_sk = 101299
+  ),
+  gen_user AS (
+    SELECT
+      gen_usr.user_sk AS gen_user_sk
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user     AS gen_usr
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_customer AS cust
+      ON gen_usr.login_id LIKE cust.spnsr_code || '%'
+    WHERE cust.cust_sk = 100809
+      AND gen_usr.user_type_dcde = 'GI'
+    LIMIT 1
+  ),
+  decoded_user AS (
+    SELECT
+      CASE
+        WHEN pu.user_type_dcde = 'IN' THEN gu.gen_user_sk
+        ELSE 101299
+      END AS user_sk
+    FROM primary_user pu
+    LEFT JOIN gen_user gu
+      ON TRUE
+  )
+
+SELECT
+  con.consl_sk,
+  con.cust_sk,
+  con.data_load_dpdnc_id,
+  con.consl_desc,
+  con.consl_src_dcde,
+  con.consl_xref_id,
+  con.consl_stat_dcde,
+  con.dflt_consl_flag,
+  con.consl_creat_user_sk,
+  con.consl_upd_user_sk,
+  con.creat_tm,
+  con.upd_tm,
+  con.creat_by,
+  con.upd_by
+FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS cua
+JOIN decoded_user AS du
+  ON cua.user_sk = du.user_sk
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl AS con
+  ON con.consl_sk       = cua.consl_sk
+  AND con.consl_stat_dcde = 'ACTIVE'
+WHERE
+  cua.consl_sk             = 1208
+  AND cua.consl_user_stat_dcde = 'ACTIVE';
