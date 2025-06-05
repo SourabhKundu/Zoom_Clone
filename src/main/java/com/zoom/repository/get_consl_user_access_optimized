@@ -1,49 +1,71 @@
-WITH generic_user AS (
-  SELECT
-    npf_security_pkg.get_generic_id(
-      :p_content_npf_user_sk,
-      :p_cust_sk
-    ) AS v_user_sk
-),
-result_set AS (
-  SELECT
-    cua.consl_sk,
-    cua.user_sk,
-    cua.consl_user_stat_dcde,
-    cua.nws_incl_flag,
-    cua.rpt_incl_flag,
-    cua.user_dflt_consl_flag,
-    cua.creat_by,
-    cua.creat_tm,
-    cua.upd_by,
-    cua.upd_tm,
-    cua.bse_curr_dcde,
-    dce.dcde_desc AS bse_curr_dcde_desc
-  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS cua
-    LEFT JOIN generic_user AS gu
+WITH
+  user_type_cte AS (
+    SELECT
+      usr.user_type_dcde
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user AS usr
+    WHERE usr.user_sk = :p_content_npf_user_sk
+  ),
+  gen_user_cte AS (
+    SELECT
+      usr.user_sk AS gen_user_sk
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user AS usr
+    JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_customer AS cust
+      ON cust.cust_sk = :p_cust_sk
+    WHERE
+      usr.user_type_dcde = 'GI'
+      AND usr.login_id LIKE cust.spnsr_code || '%'
+    LIMIT 1
+  ),
+  generic_user AS (
+    SELECT
+      CASE
+        WHEN ut.user_type_dcde = 'IN' THEN gu.gen_user_sk
+        ELSE :p_content_npf_user_sk
+      END AS v_user_sk
+    FROM user_type_cte AS ut
+    LEFT JOIN gen_user_cte   AS gu
       ON TRUE
-    LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode AS dce
-      ON dce.dcde_type = 'CURRDDLB'
-     AND dce.dcde_code = cua.bse_curr_dcde
-  WHERE
-    cua.consl_sk = :p_consl_sk
-    AND cua.consl_user_stat_dcde = 'ACTIVE'
-    AND (
-      (
-        cua.user_sk = gu.v_user_sk
-        AND NOT EXISTS (
-          SELECT 1
-          FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS orig
-          WHERE orig.consl_sk = :p_consl_sk
-            AND orig.user_sk  = :p_content_npf_user_sk
+  ),
+  result_set AS (
+    SELECT
+      cua.consl_sk,
+      cua.user_sk,
+      cua.consl_user_stat_dcde,
+      cua.nws_incl_flag,
+      cua.rpt_incl_flag,
+      cua.user_dflt_consl_flag,
+      cua.creat_by,
+      cua.creat_tm,
+      cua.upd_by,
+      cua.upd_tm,
+      cua.bse_curr_dcde,
+      dce.dcde_desc AS bse_curr_dcde_desc
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS cua
+      LEFT JOIN generic_user AS gu
+        ON cua.user_sk = gu.v_user_sk
+      LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode AS dce
+        ON dce.dcde_type = 'CURRDDLB'
+       AND dce.dcde_code = cua.bse_curr_dcde
+
+    WHERE
+      cua.consl_sk = :p_consl_sk
+      AND cua.consl_user_stat_dcde = 'ACTIVE'
+      AND (
+        (
+          cua.user_sk = gu.v_user_sk
+          AND NOT EXISTS (
+            SELECT 1
+            FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS orig
+            WHERE orig.consl_sk = :p_consl_sk
+              AND orig.user_sk  = :p_content_npf_user_sk
+          )
+        )
+        OR
+        (
+          cua.user_sk = :p_content_npf_user_sk
         )
       )
-      OR
-      (
-        cua.user_sk = :p_content_npf_user_sk
-      )
-    )
-)
+  )
 SELECT
   rs.consl_sk,
   rs.user_sk,
