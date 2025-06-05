@@ -1,0 +1,149 @@
+WITH
+internal_user_cte AS (
+  SELECT
+    usr.user_sk
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_user AS usr
+  JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_customer AS cust
+    ON cust.cust_sk = 100809
+  WHERE usr.user_type_dcde = 'GI'
+    AND usr.login_id LIKE cust.spnsr_code || '%'
+  LIMIT 1
+),
+
+consol_base_query AS (
+  SELECT
+    con.consl_sk,
+    CASE
+      WHEN NVL(con.consl_xref_id, 'E') = 'E'
+        THEN con.consl_desc
+      ELSE con.consl_xref_id || '-' || con.consl_desc
+    END AS list_desc,
+    cua.user_dflt_consl_flag,
+    con.cust_sk,
+    con.data_load_dpdnc_id,
+    con.consl_desc,
+    con.consl_src_dcde,
+    con.consl_xref_id,
+    con.consl_stat_dcde,
+    con.dflt_consl_flag,
+    con.consl_creat_user_sk,
+    con.consl_upd_user_sk,
+    con.creat_by,
+    con.creat_tm,
+    con.upd_tm,
+    cua.user_sk                                     AS cua_user_sk,
+    cua.consl_user_stat_dcde,
+    cua.nws_incl_flag,
+    cua.rpt_incl_flag,
+    cua.creat_by                                     AS cua_creat_by,
+    cua.creat_tm                                     AS cua_creat_tm,
+    cua.upd_by                                       AS cua_upd_by,
+    cua.upd_tm                                       AS cua_upd_tm,
+    CASE
+      WHEN con.consl_src_dcde = 'DB2' THEN '**'
+      ELSE con.creat_by
+    END                                              AS creat_by_sort,
+    CASE
+      WHEN con.consl_src_dcde = 'DB2' THEN '**'
+      ELSE con.upd_by
+    END                                              AS upd_by_sort,
+    CASE
+      WHEN con.consl_src_dcde = 'DB2' THEN CURRENT_TIMESTAMP
+      ELSE con.upd_tm
+    END                                              AS upd_tm_sort,
+    cua.bse_curr_dcde,
+    dc.dcde_desc                                     AS bse_curr_dcde_desc
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl AS con
+  JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS cua
+    ON cua.consl_sk = con.consl_sk
+  LEFT JOIN internal_user_cte AS iuc
+    ON TRUE
+  LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode AS dc
+    ON dc.dcde_type = 'CURR'
+   AND dc.dcde_code = cua.bse_curr_dcde
+  WHERE con.consl_stat_dcde = 'ACTIVE'
+    AND cua.consl_user_stat_dcde = 'ACTIVE'
+    AND con.cust_sk = 100809
+    AND cua.user_sk = COALESCE(iuc.user_sk, 101299)
+    AND NOT EXISTS (
+      SELECT 1
+      FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS orig
+      WHERE orig.user_sk = 101299
+        AND orig.consl_sk = con.consl_sk
+    )
+    AND cua.nws_incl_flag = 'N'
+    AND cua.rpt_incl_flag = 'N'
+),
+
+union_query AS (
+  SELECT * FROM consol_base_query
+
+  UNION
+
+  SELECT
+    con.consl_sk,
+    CASE
+      WHEN NVL(con.consl_xref_id, 'E') = 'E'
+        THEN con.consl_desc
+      ELSE con.consl_xref_id || '-' || con.consl_desc
+    END AS list_desc,
+    cua.user_dflt_consl_flag,
+    con.cust_sk,
+    con.data_load_dpdnc_id,
+    con.consl_desc,
+    con.consl_src_dcde,
+    con.consl_xref_id,
+    con.consl_stat_dcde,
+    con.dflt_consl_flag,
+    con.consl_creat_user_sk,
+    con.consl_upd_user_sk,
+    con.creat_by,
+    con.creat_tm,
+    con.upd_tm,
+    cua.user_sk                                     AS cua_user_sk,
+    cua.consl_user_stat_dcde,
+    cua.nws_incl_flag,
+    cua.rpt_incl_flag,
+    cua.creat_by                                     AS cua_creat_by,
+    cua.creat_tm                                     AS cua_creat_tm,
+    cua.upd_by                                       AS cua_upd_by,
+    cua.upd_tm                                       AS cua_upd_tm,
+    CASE
+      WHEN con.consl_src_dcde = 'DB2' THEN '**'
+      ELSE con.creat_by
+    END                                              AS creat_by_sort,
+    CASE
+      WHEN con.consl_src_dcde = 'DB2' THEN '**'
+      ELSE con.upd_by
+    END                                              AS upd_by_sort,
+    CASE
+      WHEN con.consl_src_dcde = 'DB2' THEN CURRENT_TIMESTAMP
+      ELSE con.upd_tm
+    END                                              AS upd_tm_sort,
+    cua.bse_curr_dcde,
+    dc.dcde_desc                                     AS bse_curr_dcde_desc
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl AS con
+  JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl_user_access AS cua
+    ON cua.consl_sk = con.consl_sk
+  LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode AS dc
+    ON dc.dcde_type = 'CURR'
+   AND dc.dcde_code = cua.bse_curr_dcde
+  WHERE con.consl_stat_dcde = 'ACTIVE'
+    AND cua.consl_user_stat_dcde = 'ACTIVE'
+    AND con.cust_sk = 100809
+    AND cua.user_sk = 101299
+    AND cua.nws_incl_flag = 'N'
+    AND cua.rpt_incl_flag = 'N'
+)
+
+SELECT
+  *
+FROM (
+  SELECT
+    uq.*,
+    ROW_NUMBER() OVER (ORDER BY consl_sk) AS row_num,
+    COUNT(*) OVER() AS total_count
+  FROM union_query AS uq
+) AS numbered
+WHERE row_num BETWEEN 10 AND 1000
+;
