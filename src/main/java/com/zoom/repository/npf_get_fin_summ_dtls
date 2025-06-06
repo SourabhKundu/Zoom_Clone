@@ -1,0 +1,153 @@
+WITH
+cust_data AS (
+  SELECT cust_sk
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_consl
+  WHERE consl_sk = :p_consl_sk
+),
+valn_date AS (
+  SELECT
+    CASE
+      WHEN :p_data_load_date IS NOT NULL
+        THEN TO_DATE(:p_data_load_date, 'YYYY-MM-DD')
+      ELSE (
+        SELECT MAX(data_load_date)
+        FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_data_load_date
+      )
+    END AS v_valn_as_of_date
+),
+exch_rates AS (
+  SELECT
+    base.lcl_curr_dcde,
+    base.mean_rt_amt
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_exch_rt AS base
+  JOIN (
+    SELECT
+      lcl_curr_dcde,
+      MAX(as_of_date) AS asof
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_exch_rt
+    WHERE as_of_date <= (SELECT v_valn_as_of_date FROM valn_date)
+    GROUP BY lcl_curr_dcde
+  ) AS latest
+    ON base.lcl_curr_dcde = latest.lcl_curr_dcde
+   AND base.as_of_date    = latest.asof
+),
+account_base AS (
+  SELECT
+    ac.ac_sk,
+    CASE WHEN ac.data_src_id = 12 THEN ac.ac_sk ELSE NULL END  AS pra_ac_sk,
+    ac.data_src_id,
+    ac.bse_curr_dcde,
+    CASE
+      WHEN ac.bse_curr_dcde = COALESCE(:p_consl_curr_dcde, ac.bse_curr_dcde)
+        THEN 1
+      ELSE COALESCE(er.mean_rt_amt, 1)
+    END AS exch_rt,
+    :p_consl_sk                                  AS consl_sk,
+    cd.cust_sk                                   AS cust_sk
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account AS ac
+  CROSS JOIN cust_data             AS cd
+  CROSS JOIN valn_date             AS vd
+  LEFT JOIN exch_rates             AS er
+    ON er.lcl_curr_dcde = ac.bse_curr_dcde
+),
+prtnr_pct AS (
+  SELECT
+    pr.consl_sk,
+    pr.prtnr_sk,
+    pr.ac_sk,
+    pr.comps_pct,
+    pr.cust_sk
+  FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_int_pct AS pr
+  WHERE pr.consl_sk = :p_consl_sk
+    AND pr.user_sk   = :p_user_sk
+),
+account_details AS (
+  SELECT
+    ab.ac_sk,
+    ab.pra_ac_sk,
+    ab.data_src_id,
+    ab.bse_curr_dcde,
+    ab.exch_rt,
+    COALESCE(pp.comps_pct, 0)          AS prtnr_pct,
+    ab.consl_sk,
+    ab.cust_sk
+  FROM account_base AS ab
+  LEFT JOIN prtnr_pct AS pp
+    ON ab.ac_sk = pp.ac_sk
+),
+pos_join AS (
+  SELECT
+    ad.ac_sk,
+    ad.pra_ac_sk,
+    ad.data_src_id,
+    ad.exch_rt,
+    ad.prtnr_pct,
+    ad.consl_sk,
+    ad.cust_sk,
+    pos.valn_as_of_date,
+    pos.valn_run_time,
+    pos.valn_freq_dcde,
+    pos.mv_bse_amt,
+    pos.adj_bas_bse_amt,
+    pos.unrl_tot_gnls_amt,
+    pos.inc_rcvbl_bse_amt,
+    pos.exps_pybl_bse_amt,
+    pos.instr_id
+  FROM account_details AS ad
+  JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_position AS pos
+    ON pos.ac_sk           = ad.ac_sk
+   AND pos.valn_as_of_date = (SELECT v_valn_as_of_date FROM valn_date)
+   AND pos.valn_run_time   = (SELECT v_valn_as_of_date FROM valn_date)::TIMESTAMP
+   AND pos.valn_freq_dcde  = (SELECT v_valn_as_of_date FROM valn_date)
+  WHERE (SELECT v_valn_as_of_date FROM valn_date) IS NOT NULL
+),
+summ_posn AS (
+  SELECT
+    NVL(pj.pra_ac_sk, pj.ac_sk)                    AS ac_sk,
+    pj.consl_sk,
+    pj.data_src_id,
+    pj.valn_as_of_date,
+    SUM(pj.mv_bse_amt  * pj.exch_rt * pj.prtnr_pct)    AS mv_bse_amt,
+    SUM(pj.adj_bas_bse_amt * pj.exch_rt * pj.prtnr_pct) AS adj_bas_bse_amt,
+    SUM(pj.unrl_tot_gnls_amt * pj.exch_rt * pj.prtnr_pct) AS unrl_tot_gnls_amt,
+    SUM(pj.inc_rcvbl_bse_amt * pj.exch_rt * pj.prtnr_pct) AS inc_rcvbl_bse_amt,
+    SUM(pj.exps_pybl_bse_amt * pj.exch_rt * pj.prtnr_pct)  AS exps_pybl_bse_amt,
+    CASE 
+      WHEN MAX(CASE WHEN pj.adj_bas_bse_amt IS NULL THEN 'Y' ELSE 'N' END) = 'Y'
+      THEN 'Y' ELSE 'N'
+    END                                             AS cst_bas_null_flg,
+    CASE 
+      WHEN MAX(CASE WHEN pj.unrl_tot_gnls_amt IS NULL THEN 'Y' ELSE 'N' END) = 'Y'
+      THEN 'Y' ELSE 'N'
+    END                                             AS unrl_tot_gnls_null_flg
+  FROM pos_join AS pj
+  WHERE pj.data_src_id <> 12
+    AND NOT EXISTS (
+      SELECT 1
+      FROM prtnr_pct AS pp
+      WHERE pp.ac_sk    = pj.ac_sk
+        AND pp.instr_id = pj.instr_id
+        AND pj.pra_ac_sk IS NULL
+    )
+  GROUP BY
+    NVL(pj.pra_ac_sk, pj.ac_sk),
+    pj.consl_sk,
+    pj.data_src_id,
+    pj.valn_as_of_date
+)
+SELECT
+  sp.consl_sk,
+  COALESCE(
+    MAX(sp.valn_as_of_date),
+    (SELECT v_valn_as_of_date FROM valn_date)
+  )                          AS valn_as_of_date,
+  SUM(sp.mv_bse_amt)         AS mv_bse_amt,
+  SUM(sp.adj_bas_bse_amt)    AS adj_bas_bse_amt,
+  SUM(sp.unrl_tot_gnls_amt)  AS unrl_tot_gnls_amt,
+  SUM(sp.inc_rcvbl_bse_amt)  AS inc_rcvbl_bse_amt,
+  SUM(sp.exps_pybl_bse_amt)  AS exps_pybl_bse_amt,
+  MAX(sp.cst_bas_null_flg)   AS cst_bas_null_flg,
+  MAX(sp.unrl_tot_gnls_null_flg) AS unrl_tot_gnls_null_flg
+FROM summ_posn AS sp
+CROSS JOIN valn_date AS vd
+GROUP BY sp.consl_sk;
