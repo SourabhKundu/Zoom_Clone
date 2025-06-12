@@ -1,0 +1,106 @@
+WITH
+  strm AS (
+    SELECT
+      MAX(al.stream_load_date) AS strm_date
+    FROM (
+      SELECT
+        rl.src_stream_id,
+        rl.stream_load_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY rl.src_stream_id 
+          ORDER BY rl.run_start_tm DESC
+        ) rn
+      FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_data_src_stream_run_log rl
+      WHERE rl.stream_load_date = (
+        SELECT MAX(stream_load_date)
+        FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_data_src_stream_run_log
+      )
+    ) latest_rl
+    JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_stream_ac_load al
+      ON latest_rl.src_stream_id   = al.src_stream_id
+     AND latest_rl.stream_load_date = al.stream_load_date
+    WHERE latest_rl.rn = 1
+      AND al.ac_sk = :p_ac_sk
+      AND latest_rl.src_stream_stat = 'NPF_DATALOAD_SUCCESS'
+  ),
+
+  flags AS (
+    SELECT
+      NVL(MAX(CASE WHEN dcde_code = 'GDR_GLBL' THEN dcde_desc END), 'N')    AS gdr_glbl_flag,
+      NVL(MAX(CASE WHEN dcde_code = 'LNKD_ASSET' THEN dcde_desc END), 'N')   AS gdr_lnkd_asset_flag
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
+    WHERE dcde_type = 'GDR_ENBL_FLG'
+  ),
+
+  load_dt AS (
+    SELECT MAX(TRUNC(data_load_date)) AS max_ld
+    FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_data_load_date
+  ),
+
+  raw_bus_day AS (
+    SELECT
+      CASE
+        WHEN f.gdr_lnkd_asset_flag = 'Y'
+         AND f.gdr_glbl_flag     = 'Y'
+        THEN NVL(s.strm_date, ld.max_ld)
+        ELSE ld.max_ld
+      END AS day0
+    FROM strm s
+    CROSS JOIN load_dt ld
+    CROSS JOIN flags   f
+  ),
+
+  bus_day AS (
+    SELECT
+      CASE
+        WHEN TRIM(TO_CHAR(day0,'DY','NLS_DATE_LANGUAGE=ENGLISH')) = 'SAT'
+          THEN day0 - 1
+        WHEN TRIM(TO_CHAR(day0,'DY','NLS_DATE_LANGUAGE=ENGLISH')) = 'SUN'
+          THEN day0 - 2
+        ELSE day0
+      END AS valn_date
+    FROM raw_bus_day
+  ),
+
+  is_decoder AS (
+    SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS yesno
+    FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_decoder_xref
+    WHERE decoder_ac_sk = :p_ac_sk
+  ),
+
+  dec_ac AS (
+    SELECT cmpnt_ac_sk
+    FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_decoder_xref
+    WHERE decoder_ac_sk = :p_ac_sk
+  )
+
+SELECT DISTINCT
+  ast.instr_id,
+  ast.tnt_sec_id,
+  NVL(ast.ast_short_desc, ast.ast_long_desc) AS ast_desc,
+  acc2.ac_id
+FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_position np
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account acc
+  ON np.ac_sk = acc.ac_sk
+LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac mstr
+  ON mstr.lnkd_ac_sk = np.ac_sk
+ AND mstr.instr_id   = np.instr_id
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset ast
+  ON ast.instr_id = np.instr_id
+LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account acc2
+  ON acc2.ac_sk = mstr.ac_sk
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset_catg catg
+  ON catg.iss_type      = ast.iss_type
+ AND catg.supcatg_code <> '90'
+ AND catg.rptg_type     = 'WLT'
+CROSS JOIN bus_day       bd
+CROSS JOIN is_decoder    id
+LEFT JOIN dec_ac         dac
+  ON acc.ac_sk = dac.cmpnt_ac_sk
+WHERE TRUNC(np.valn_as_of_date) = bd.valn_date
+  AND (
+    (id.yesno = 1 AND acc.ac_sk IN (SELECT cmpnt_ac_sk FROM dec_ac))
+     OR
+    (id.yesno = 0 AND acc.ac_sk = :p_ac_sk)
+  )
+ORDER BY ast_desc;
