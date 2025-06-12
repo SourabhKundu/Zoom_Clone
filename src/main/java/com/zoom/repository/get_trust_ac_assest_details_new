@@ -1,5 +1,5 @@
 WITH
-  strm AS MATERIALIZED (
+  strm AS (
     SELECT  
       MAX(al.stream_load_date) AS strm_date
     FROM (
@@ -10,13 +10,13 @@ WITH
           PARTITION BY rl.src_stream_id 
           ORDER BY rl.run_start_tm DESC
         ) AS rn
-      FROM npf_data_src_stream_run_log rl
+      FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_data_src_stream_run_log rl
       WHERE rl.stream_load_date = (
         SELECT MAX(stream_load_date) 
-        FROM npf_data_src_stream_run_log
+        FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_data_src_stream_run_log
       )
     ) AS latest_rl
-    JOIN npf_stream_ac_load al
+    JOIN DEV_WPA_ACCOUNTS_DB.CORE.npf_stream_ac_load al
       ON latest_rl.src_stream_id   = al.src_stream_id
      AND latest_rl.stream_load_date = al.stream_load_date
     WHERE latest_rl.rn = 1
@@ -24,20 +24,20 @@ WITH
       AND latest_rl.src_stream_stat = 'NPF_DATALOAD_SUCCESS'
   ),
 
-  flags AS MATERIALIZED (
+  flags AS (
     SELECT
       COALESCE(MAX(IFF(dcde_code = 'GDR_GLBL', dcde_desc, NULL)), 'N')    AS gdr_glbl_flag,
       COALESCE(MAX(IFF(dcde_code = 'LNKD_ASSET', dcde_desc, NULL)), 'N') AS gdr_lnkd_asset_flag
-    FROM npf_decode
+    FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_decode
     WHERE dcde_type = 'GDR_ENBL_FLG'
   ),
 
-  load_dt AS MATERIALIZED (
+  load_dt AS (
     SELECT MAX(DATE_TRUNC('DAY', data_load_date)) AS max_ld
-    FROM npf_data_load_date
+    FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_data_load_date
   ),
 
-  raw_bus_day AS MATERIALIZED (
+  raw_bus_day AS (
     SELECT
       IFF(
         f.gdr_lnkd_asset_flag = 'Y'
@@ -50,7 +50,7 @@ WITH
     CROSS JOIN flags   AS f
   ),
 
-  bus_day AS MATERIALIZED (
+  bus_day AS (
     SELECT
       IFF(
         DAYOFWEEKISO(day0) = 6,
@@ -65,13 +65,13 @@ WITH
 
   is_decoder AS (
     SELECT BOOL_OR(TRUE) AS yesno
-    FROM npf_decoder_xref
+    FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_decoder_xref
     WHERE decoder_ac_sk = :p_ac_sk
   ),
 
   dec_ac AS (
     SELECT cmpnt_ac_sk
-    FROM npf_decoder_xref
+    FROM DEV_WPA_ACCOUNTS_DB.CORE.npf_decoder_xref
     WHERE decoder_ac_sk = :p_ac_sk
   )
 
@@ -80,14 +80,14 @@ SELECT DISTINCT
   ast.tnt_sec_id,
   COALESCE(ast.ast_short_desc, ast.ast_long_desc) AS ast_desc,
   acc2.ac_id
-FROM npf_position       np
-JOIN npf_account        acc   ON np.ac_sk = acc.ac_sk
-LEFT JOIN npf_mstr_prtnr_ac mstr 
+FROM DEV_ANCHOR_ANALYTICS.WP_SRC.npf_position       np
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account        acc   ON np.ac_sk = acc.ac_sk
+LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_mstr_prtnr_ac mstr 
                         ON mstr.lnkd_ac_sk = np.ac_sk
                        AND mstr.instr_id   = np.instr_id
-JOIN npf_asset         ast   ON ast.instr_id = np.instr_id
-LEFT JOIN npf_account   acc2  ON acc2.ac_sk   = mstr.ac_sk
-JOIN npf_asset_catg    catg
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset         ast   ON ast.instr_id = np.instr_id
+LEFT JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_account   acc2  ON acc2.ac_sk   = mstr.ac_sk
+JOIN DEV_ANCHOR_ANALYTICS.WP_SRC.npf_asset_catg    catg
   ON catg.iss_type      = ast.iss_type
  AND catg.supcatg_code <> '90'
  AND catg.rptg_type     = 'WLT'
